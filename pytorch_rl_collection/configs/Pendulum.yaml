@@ -1,0 +1,14 @@
+params_idxs:
+  ##
+  m: [0]
+  l: [0]
+  g: [1]
+
+# Index of parameters in the environment model
+params_env_idxs: {}
+
+params_relative_ranges:
+  ##
+  m: [0.5, 2.]
+  l: [0.5, 2.]
+  g: [0.8, 1.2]

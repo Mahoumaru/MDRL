@@ -1,0 +1,69 @@
+# Index of parameters in the randomized params vector
+2d:
+  params_idxs:
+    ##
+    actuator_gainprm: [0]
+    dof_damping: [1]
+    #body_pos: [21, 22]
+
+  # Index of parameters in the environment model
+  params_env_idxs:
+    ##
+    actuator_gainprm: [[0, 1, 2, 3, 4, 5, 6, 7, 8], 0]
+    dof_damping: [0, 1, 2, 3, 4, 5, 6, 7, 8, 18]
+    #body_pos: [[1], [2]] # This controls the height of the fingers' base (default value is 0.335)
+    ## To change instead the position of the fingers with respect to the object, the following is used:
+    #body_pos: [[[3, 3], [7, 7], [11, 11], [16, 16], [20, 20], [24, 24]], [[0, 1], [0, 1], [0, 1], [0, 1], [0, 1], [0, 1]]]
+
+  params_relative_ranges:
+    ##
+    actuator_gainprm: [0.2, 1.8]
+    dof_damping: [0.05, 1.95]
+    #body_pos: [0.8, 1.078]
+    #body_pos_angle: [0.1, 1.9]
+    #body_pos_radius: [0.8, 1.6]
+
+multi_dim:
+  params_idxs:
+    ##
+    #body_mass: [0]
+    #actuator_gear: [1]
+    actuator_gainprm: [0, 1, 2, 3, 4, 5, 6, 7, 8]
+    #dof_armature: [9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
+    dof_damping: [9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
+    #[19, 20, 21, 22, 23, 24, 25, 26, 27, 28]
+    #opt.gravity: [19]
+    opt.timestep: [19]
+    #[20]
+    body_pos: [20, 21]
+    #[21, 22]
+
+  # Index of parameters in the environment model
+  params_env_idxs:
+    ##
+    #body_mass: [4, 5, 6, 8, 9, 10, 12, 13, 14, 29, 30]
+    #actuator_gear: [[0, 1, 2, 3, 4, 5, 6, 7, 8], 0]
+    actuator_gainprm: [[0, 1, 2, 3, 4, 5, 6, 7, 8], 0]
+    #dof_armature: [0, 1, 2, 3, 4, 5, 6, 7, 8, 18]
+    dof_damping: [0, 1, 2, 3, 4, 5, 6, 7, 8, 18]
+    #opt.gravity: [2]
+    opt.timestep: []
+    #body_pos: [[1], [2]] # This controls the height of the fingers' base (default value is 0.335)
+    ## To change instead the position of the fingers with respect to the object, the following is used:
+    body_pos: [[[3, 3], [7, 7], [11, 11], [16, 16], [20, 20], [24, 24]], [[0, 1], [0, 1], [0, 1], [0, 1], [0, 1], [0, 1]]]
+
+  params_relative_ranges:
+    ##
+    #body_mass: [0.5, 2.]
+    #actuator_gear: [0.5, 2.]
+    actuator_gainprm: [0.2, 1.8]
+    #dof_armature: [0.5, 2.]
+    dof_damping: [0.05, 1.95]
+    #opt.gravity: [0.9, 1.2]
+    opt.timestep: [0.925, 1.075] # [37 / env.frame_skip, 43 / env.frame_skip]
+    #[0.875, 1.125] # [35 / env.frame_skip, 45 / env.frame_skip]
+    #body_pos: [0.8, 1.078]
+    body_pos_angle: [0.8, 1.2]
+    #[0.1, 1.9]
+    body_pos_radius: [0.8, 1.2]
+    #[0.8, 1.6]

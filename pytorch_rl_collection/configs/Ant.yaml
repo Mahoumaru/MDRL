@@ -1,0 +1,43 @@
+# Index of parameters in the randomized params vector
+2d:
+  params_idxs:
+    ##
+    body_mass: [0]
+    dof_armature: [1]
+
+  # Index of parameters in the environment model
+  params_env_idxs:
+    ##
+    body_mass: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+    dof_armature: [6, 7, 8, 9, 10, 11, 12, 13]
+
+  params_relative_ranges:
+    ##
+    body_mass: [0.5, 2.]
+    dof_armature: [0.5, 2.]
+
+multi_dim:
+  params_idxs:
+    ##
+    body_mass: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    dof_armature: [13, 14, 15, 16, 17, 18, 19, 20]
+    dof_damping: [21, 22, 23, 24, 25, 26, 27, 28]
+    opt.gravity: [29]
+    opt.timestep: [30]
+
+  # Index of parameters in the environment model
+  params_env_idxs:
+    ##
+    body_mass: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+    dof_armature: [6, 7, 8, 9, 10, 11, 12, 13]
+    dof_damping: [6, 7, 8, 9, 10, 11, 12, 13]
+    opt.gravity: [2]
+    opt.timestep: []
+
+  params_relative_ranges:
+    ##
+    body_mass: [0.5, 2.]
+    dof_armature: [0.5, 2.]
+    dof_damping: [0.5, 2.]
+    opt.gravity: [0.9, 1.2]
+    opt.timestep: [0.8, 1.2] # [4 / env.frame_skip, 6 / env.frame_skip]
