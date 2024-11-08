@@ -8,8 +8,7 @@ import numpy as np
 from pytorch_rl_collection.model_networks.model_networks import SacSolver as Solver
 from pytorch_rl_collection.replay_buffers.replay_memory import ReplayMemory
 from pytorch_rl_collection.utils import *#hard_update, soft_update
-from pytorch_rl_collection.model_networks.model_networks import DynamicsNet, EnsembleOSINet#, OSINet
-#from pytorch_rl_collection.model_networks.model_networks import EnsembleSystemID
+from pytorch_rl_collection.model_networks.model_networks import DynamicsNet, EnsembleOSINet
 
 from torch.distributions import Normal
 

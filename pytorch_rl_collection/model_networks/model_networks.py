@@ -221,6 +221,154 @@ class SacCritic(nn.Module):
         return out[0]
 
 ###########################################
+class SacSolver(nn.Module):
+    def __init__(self, nb_states, nb_kappa=0, hidden_layers=[256, 256],
+                solver_type="Deterministic", double=False, sigmoid_fn=True,
+                no_output_activa_fct=False):
+        assert solver_type in ["Deterministic", "Gaussian"]
+        super(SacSolver, self).__init__()
+        self.solver_type = solver_type
+        self._nb_states = nb_states
+        self._nb_kappa = nb_kappa
+        layers = []
+        ######
+        if no_output_activa_fct:
+            self.output_fn = lambda x: x
+            self.output_fn_der = lambda x: 0.
+        elif sigmoid_fn:
+            self.output_fn = th.sigmoid
+            self.output_fn_der = lambda x: (x + 1e-6).log() + th.log(1. - x + 1e-6)
+        else:
+            self.output_fn = th.tanh
+            self.output_fn_der = lambda x: th.log(1. - x.square() + 1e-6)
+        ######
+        if not double:
+            layers.append(nn.Linear(nb_states + nb_kappa, hidden_layers[0]))
+        else:
+            layers.append(nn.Linear(nb_states + 2*nb_kappa, hidden_layers[0]))
+        n_hidden_layers = len(hidden_layers)
+        for i in range(n_hidden_layers-1):
+            layers.append(nn.Linear(hidden_layers[i], hidden_layers[i+1]))
+        layers.append(nn.Linear(hidden_layers[-1], nb_kappa)) # head for mu
+        layers.append(nn.Linear(hidden_layers[-1], nb_kappa)) # head for sigma
+        self._n = 2
+        if solver_type == "Gaussian":
+            layers.append(nn.Linear(hidden_layers[-1], nb_kappa)) # std head for mu
+            layers.append(nn.Linear(hidden_layers[-1], nb_kappa)) # std head for sigma
+        self.network = nn.ModuleList(layers)
+        self._network_size = len(self.network)
+        ####
+        self.apply(weights_init_)
+
+    def forward(self, x):
+        out = (x,)
+        ######
+        N = self._network_size
+        if self.solver_type == "Deterministic":
+            for i, fc in enumerate(self.network):
+                if i < N - 2:
+                    out = (F.relu(fc(*out)),)
+                else:
+                    break
+            ####
+            out = out[0]
+            mean = self.output_fn(self.network[-2](out))
+            sig = self.output_fn(self.network[-1](out))
+            ####
+            return mean, sig
+        else:
+            for i, fc in enumerate(self.network):
+                if i < N - 4:
+                    out = (F.relu(fc(*out)),)
+                else:
+                    break
+            ####
+            out = out[0]
+            mu_mean = self.network[-4](out)
+            sig_mean = self.network[-3](out)
+            mu_log_std = self.network[-2](out)
+            sig_log_std = self.network[-1](out)
+            ####
+            mu_log_std = th.clamp(mu_log_std, min=LOG_SIG_MIN, max=LOG_SIG_MAX)
+            sig_log_std = th.clamp(sig_log_std, min=LOG_SIG_MIN, max=LOG_SIG_MAX)
+            ###
+            mu_normal = Normal(mu_mean, mu_log_std.exp())
+            sig_normal = Normal(sig_mean, sig_log_std.exp())
+            mu = mu_normal.rsample()
+            sig = sig_normal.rsample()
+            mu_log_prob = mu_normal.log_prob(mu)
+            sig_log_prob = sig_normal.log_prob(sig)
+            log_prob = th.cat((mu_log_prob, sig_log_prob), dim=-1)
+            ####
+            mu_out = self.output_fn(mu)
+            sig_out = self.output_fn(sig)
+            out = th.cat((mu_out, sig_out), dim=-1)
+            log_prob -= self.output_fn_der(out)
+            log_prob = log_prob.sum(-1, keepdim=True)
+            ###
+            mu_mean = self.output_fn(mu_mean)
+            sig_mean = self.output_fn(sig_mean)
+            ###
+            return mu_out, sig_out, log_prob, mu_mean, sig_mean
+
+    def sample(self, x, n=1):
+        if self.solver_type == "Deterministic":
+            return self(x)
+        else:
+            out = (x,)
+            ######
+            N = self._network_size
+            for i, fc in enumerate(self.network):
+                if i < N - 4:
+                    out = (F.relu(fc(*out)),)
+                else:
+                    break
+            ####
+            out = out[0]
+            mu_mean = self.network[-4](out)
+            sig_mean = self.network[-3](out)
+            mu_log_std = self.network[-2](out)
+            sig_log_std = self.network[-1](out)
+            ####
+            mu_log_std = th.clamp(mu_log_std, min=LOG_SIG_MIN, max=LOG_SIG_MAX)
+            sig_log_std = th.clamp(sig_log_std, min=LOG_SIG_MIN, max=LOG_SIG_MAX)
+            ###
+            mu_normal = Normal(mu_mean, mu_log_std.exp())
+            sig_normal = Normal(sig_mean, sig_log_std.exp())
+            mu = mu_normal.rsample([n])
+            sig = sig_normal.rsample([n])
+            ####
+            mu_out = self.output_fn(mu)
+            sig_out = self.output_fn(sig)
+            ####
+            return mu_out, sig_out
+
+###########################################
+class EnsembleSacSolver(nn.Module):
+    def __init__(self, ensemble_size, nb_states, nb_kappa=0, hidden_layers=[256, 256],
+                solver_type="Deterministic", double=False, sigmoid_fn=True,
+                no_output_activa_fct=False, device='cpu'):
+        super(EnsembleSacSolver, self).__init__()
+        self.ensemble_size = ensemble_size
+        solver_list = []
+        for _ in range(ensemble_size):
+            solver_list.append(
+                SacSolver(nb_states, nb_kappa=nb_kappa, hidden_layers=hidden_layers,
+                        solver_type=solver_type, double=double, sigmoid_fn=sigmoid_fn,
+                        no_output_activa_fct=no_output_activa_fct).to(device)
+            )
+        self.base_model = deepcopy(solver_list[0])
+        self.params, self.buffers = th.func.stack_module_state(solver_list)
+
+    def forward(self, x):
+        def fmodel(params, buffers, data):
+            return th.func.functional_call(self.base_model, (params, buffers), (data,))
+        return th.vmap(fmodel, in_dims=(0, 0, None))(self.params, self.buffers, x)
+
+    def get_optimizer(self, OptimCls, lr):
+        return OptimCls(self.params.values(), lr=lr)
+
+###########################################
 class Encoder(nn.Module):
     def __init__(self, nb_envparams, nb_latent, hidden_layers=[300, 200], init_w=3e-3, verbose=False):
         super(Encoder, self).__init__()
