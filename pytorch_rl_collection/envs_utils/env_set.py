@@ -34,15 +34,9 @@ class MDEnvSet:
             self.observation_noise = 5e-3 if add_noise else None
             self.observation_keys = (
                'claw_qpos',
-               #'claw_qvel',
-               #'object_qpos',
                'object_x',
                'object_y',
-               #'object_qvel',
                'last_action',
-               #'target_qpos',
-               #'target_x',
-               #'target_y',
                'target_error',
             )
             print("++ Observation noise: ", self.observation_noise)
@@ -83,7 +77,7 @@ class MDEnvSet:
         #######
         try:
             if "mujoco" in str(type(self.env_set[0].env.env.env.env)):
-                if getattr(self.env_set[0], "sim", None) is None:
+                if getattr(self.env_set[0].unwrapped, "sim", None) is None:
                     self.reset = self._mujoco_reset
                 else:
                     self.reset = self._mujocopy_reset
@@ -167,8 +161,8 @@ class MDEnvSet:
                     self.ub_params += [ub]#[ub * params]
                     self.nominal_params[key] = float(params)
             else:
-                #if getattr(self.env_set[0], "model", None) is not None:
-                #    self._env_masses = copy.deepcopy(self.env_set[0].model.body_mass.copy())
+                #if getattr(self.env_set[0].unwrapped, "model", None) is not None:
+                #    self._env_masses = copy.deepcopy(self.env_set[0].unwrapped.model.body_mass.copy())
                 for key in self.params_relative_ranges.keys():
                     lb, ub = self.params_relative_ranges[key]
                     ##
@@ -178,9 +172,9 @@ class MDEnvSet:
                         self.ub_params += [ub] if not linear else [ub * self.nominal_params[key]]
                     else:
                         try:
-                            params = rgetattr(self.env_set[0].sim.model, key, None)
+                            params = rgetattr(self.env_set[0].unwrapped.sim.model, key, None)
                         except AttributeError:
-                            params = rgetattr(self.env_set[0].model, key, None)
+                            params = rgetattr(self.env_set[0].unwrapped.model, key, None)
                         if isinstance(params, float):
                             #self.nominal_params += [params]
                             self.nominal_params[key] = float(params)
@@ -234,7 +228,7 @@ class MDEnvSet:
             if self._env_name == "Pendulum-v1":
                 self._env_masses = 1.0 * new_env.m
             else:
-                if getattr(new_env, "model", None) is not None:
+                if getattr(new_env.unwrapped, "model", None) is not None:
                     self._env_masses = copy.deepcopy(new_env.unwrapped.model.body_mass.copy())
 
     def seed(self, seed, same=True):
@@ -276,9 +270,9 @@ class MDEnvSet:
                     rsetattr(env.env.env.env.env, key, params[self.params_idxs[key][0]] * self.nominal_params[key])
                 else:
                     rsetattr(env.env.env.env.env, key, params[self.params_idxs[key][0]])
-        elif getattr(env, "model", None) is not None:
+        elif getattr(env.unwrapped, "model", None) is not None:
             #for idx in range(len(self._env_masses)):
-            #    env.model.body_mass[idx] = relative_mass * self._env_masses[idx]
+            #    env.unwrapped.model.body_mass[idx] = relative_mass * self._env_masses[idx]
             for key in keys:
                 idxs = self.params_env_idxs[key]
                 take_tuple = False
@@ -302,34 +296,34 @@ class MDEnvSet:
                         v_tfbase = rotate(v=v_ffbase, ang=4.*np.pi/3.)
                         ###
                         new_vals = np.array([np.round(v_ffbase, 3), np.round(v_mfbase, 3), np.round(v_tfbase, 3)]*2)
-                        rgetattr(env.sim.model, key, None)[idxs] = new_vals
+                        rgetattr(env.unwrapped.sim.model, key, None)[idxs] = new_vals
                         ###
                     else:
                         if not self._linear:
                             try:
-                                rgetattr(env.sim.model, key, None)[idxs] = params[self.params_idxs[key]] * self.nominal_params[key]
+                                rgetattr(env.unwrapped.sim.model, key, None)[idxs] = params[self.params_idxs[key]] * self.nominal_params[key]
                                 if "actuator_gainprm" in key:
                                     idxs = (idxs[0], 1)
-                                    rgetattr(env.sim.model, key.replace("actuator_gainprm", "actuator_biasprm"), None)[idxs] = - params[self.params_idxs[key]] * self.nominal_params[key]
+                                    rgetattr(env.unwrapped.sim.model, key.replace("actuator_gainprm", "actuator_biasprm"), None)[idxs] = - params[self.params_idxs[key]] * self.nominal_params[key]
                             except AttributeError:
                                 rgetattr(env.unwrapped.model, key, None)[idxs] = params[self.params_idxs[key]] * self.nominal_params[key]
                         else:
                             try:
-                                rgetattr(env.sim.model, key, None)[idxs] = params[self.params_idxs[key]]
+                                rgetattr(env.unwrapped.sim.model, key, None)[idxs] = params[self.params_idxs[key]]
                                 if "actuator_gainprm" in key:
                                     idxs = (idxs[0], 1)
-                                    rgetattr(env.sim.model, key.replace("actuator_gainprm", "actuator_biasprm"), None)[idxs] = - params[self.params_idxs[key]]
+                                    rgetattr(env.unwrapped.sim.model, key.replace("actuator_gainprm", "actuator_biasprm"), None)[idxs] = - params[self.params_idxs[key]]
                             except AttributeError:
                                 rgetattr(env.unwrapped.model, key, None)[idxs] = params[self.params_idxs[key]]
                 else:
                     if not self._linear:
                         try:
-                            rsetattr(env.sim.model, key, params[self.params_idxs[key]] * self.nominal_params[key])
+                            rsetattr(env.unwrapped.sim.model, key, params[self.params_idxs[key]] * self.nominal_params[key])
                         except AttributeError:
                             rsetattr(env.unwrapped.model, key, params[self.params_idxs[key]] * self.nominal_params[key])
                     else:
                         try:
-                            rsetattr(env.sim.model, key, params[self.params_idxs[key]])
+                            rsetattr(env.unwrapped.sim.model, key, params[self.params_idxs[key]])
                         except AttributeError:
                             rsetattr(env.unwrapped.model, key, params[self.params_idxs[key]])
 
@@ -351,10 +345,10 @@ class MDEnvSet:
     def get_state(self):
         if "Pendulum" in self._env_name:
             st = self.getState(self.env_set[0])
-        elif getattr(self.env_set[0], "sim", None) is None:
+        elif getattr(self.env_set[0].unwrapped, "sim", None) is None:
             st = self.bullet_getState(self.env_set[0])
         else:
-            st = self.env_set[0].sim.get_state()
+            st = self.env_set[0].unwrapped.sim.get_state()
         return st
 
     def set_state(self, st):
@@ -364,19 +358,19 @@ class MDEnvSet:
                 s = self.getState(env)
                 assert (np.round(s[0], 8) == np.round(st[0], 8)).all(), "{} != {}".format(s[0], st[0])
                 assert (np.round(s[1], 8) == np.round(st[1], 8)).all(), "{} != {}".format(s[1], st[1])
-            elif getattr(self.env_set[0], "sim", None) is None:
+            elif getattr(self.env_set[0].unwrapped, "sim", None) is None:
                 self.bullet_setState(st.qpos, st.qvel, env)
                 s = self.bullet_getState(env)
                 assert (np.round(s.qpos, 8) == np.round(st.qpos, 8)).all(), "{} != {}".format(s.qpos, st.qpos)
                 assert (np.round(s.qvel, 8) == np.round(st.qvel, 8)).all(), "{} != {}".format(s.qvel, st.qvel)
             else:
                 try:
-                    env.set_state(st.qpos, st.qvel)
-                    s = env.sim.get_state()
+                    env.unwrapped.set_state(st.qpos, st.qvel)
+                    s = env.unwrapped.sim.get_state()
                 except TypeError as err:
                     ## DClaw
-                    env.sim.set_state(st)
-                    s = env.sim.get_state()
+                    env.unwrapped.sim.set_state(st)
+                    s = env.unwrapped.sim.get_state()
                 assert (np.round(s.qpos, 8) == np.round(st.qpos, 8)).all(), "{} != {}".format(s.qpos, st.qpos)
                 assert (np.round(s.qvel, 8) == np.round(st.qvel, 8)).all(), "{} != {}".format(s.qvel, st.qvel)
 
@@ -427,10 +421,10 @@ class MDEnvSet:
             state, _ = self.env_set[idx].reset()
             if "Pendulum" in self._env_name:
                 st = self.getState(self.env_set[idx])
-            elif getattr(self.env_set[idx], "sim", None) is None:
+            elif getattr(self.env_set[idx].unwrapped, "sim", None) is None:
                 st = self.bullet_getState(self.env_set[idx])
             else:
-                st = self.env_set[idx].sim.get_state()
+                st = self.env_set[idx].unwrapped.sim.get_state()
             #####
             for i, env in enumerate(self.env_set):
                 if i != idx:
@@ -440,19 +434,19 @@ class MDEnvSet:
                         s = self.getState(env)
                         assert (np.round(s[0], 8) == np.round(st[0], 8)).all(), "{} != {}".format(s[0], st[0])
                         assert (np.round(s[1], 8) == np.round(st[1], 8)).all(), "{} != {}".format(s[1], st[1])
-                    elif getattr(self.env_set[idx], "sim", None) is None:
+                    elif getattr(self.env_set[idx].unwrapped, "sim", None) is None:
                         self.bullet_setState(st.qpos, st.qvel, env)
                         s = self.bullet_getState(env)
                         assert (np.round(s.qpos, 8) == np.round(st.qpos, 8)).all(), "{} != {}".format(s.qpos, st.qpos)
                         assert (np.round(s.qvel, 8) == np.round(st.qvel, 8)).all(), "{} != {}".format(s.qvel, st.qvel)
                     else:
                         try:
-                            env.set_state(st.qpos, st.qvel)
-                            s = env.sim.get_state()
+                            env.unwrapped.set_state(st.qpos, st.qvel)
+                            s = env.unwrapped.sim.get_state()
                         except TypeError as err:
                             ## DClaw
-                            env.sim.set_state(st)
-                            s = env.sim.get_state()
+                            env.unwrapped.sim.set_state(st)
+                            s = env.unwrapped.sim.get_state()
                         assert (np.round(s.qpos, 8) == np.round(st.qpos, 8)).all(), "{} != {}".format(s.qpos, st.qpos)
                         assert (np.round(s.qvel, 8) == np.round(st.qvel, 8)).all(), "{} != {}".format(s.qvel, st.qvel)
             ####
@@ -482,7 +476,7 @@ class MDEnvSet:
             for i, env in enumerate(self.env_set):
                 if i != idx:
                     _ = env.reset()
-                    env.set_state(st[0], st[1])
+                    env.unwrapped.set_state(st[0], st[1])
                     s = (env.data.qpos, env.data.qvel)
                     assert (np.round(s[0], 8) == np.round(st[0], 8)).all(), "{} != {}".format(s[0], st[0])
                     assert (np.round(s[1], 8) == np.round(st[1], 8)).all(), "{} != {}".format(s[1], st[1])
@@ -564,12 +558,9 @@ class MDEnvSet:
 class SIRSAMDEnvSet:
     def __init__(self, env_name, multi_dim, n_regions=100, seed=None, use_encoder=False, add_noise=False, use_quasi_random=False):
         ###### Read config file
-        if use_encoder:
-            config_filename = env_name.split("-")[0] + ".yaml"
-        else:
-            config_filename = env_name.split("-")[0] + "_for_test" + ".yaml"
+        config_filename = env_name.split("-")[0] + ".yaml"
         if "DClaw" in config_filename:
-            config_filename = "DClaw.yaml" if use_encoder else "DClaw_for_test.yaml"
+            config_filename = "DClaw.yaml"
             self.observation_noise = 5e-3 if add_noise else None
             self.observation_keys = (
                'claw_qpos',
@@ -614,7 +605,7 @@ class SIRSAMDEnvSet:
         #######
         try:
             if "mujoco" in str(type(self.env_set[0].env.env.env.env)):
-                if getattr(self.env_set[0], "sim", None) is None:
+                if getattr(self.env_set[0].unwrapped, "sim", None) is None:
                     self.reset = self._mujoco_reset
                 else:
                     self.reset = self._mujocopy_reset
@@ -702,9 +693,9 @@ class SIRSAMDEnvSet:
                         self.nominal_params[key] = 0.5232783221319756 if "angle" in key else 0.06003332407921454
                     else:
                         try:
-                            params = rgetattr(self.env_set[0].sim.model, key, None)
+                            params = rgetattr(self.env_set[0].unwrapped.sim.model, key, None)
                         except AttributeError:
-                            params = rgetattr(self.env_set[0].model, key, None)
+                            params = rgetattr(self.env_set[0].unwrapped.model, key, None)
                         if isinstance(params, float):
                             self.lb_params += [lb]
                             self.ub_params += [ub]
@@ -753,7 +744,7 @@ class SIRSAMDEnvSet:
             if self._env_name == "Pendulum-v1":
                 self._env_masses = 1.0 * new_env.m
             else:
-                if getattr(new_env, "model", None) is not None:
+                if getattr(new_env.unwrapped, "model", None) is not None:
                     self._env_masses = copy.deepcopy(new_env.unwrapped.model.body_mass.copy())
 
     def seed(self, seed, same=True):
@@ -785,7 +776,7 @@ class SIRSAMDEnvSet:
         if self._env_name == "Pendulum-v1":
             for key in keys:
                 rsetattr(env.env.env.env.env, key, params[self.params_idxs[key][0]] * self.nominal_params[key])
-        elif getattr(env, "model", None) is not None:
+        elif getattr(env.unwrapped, "model", None) is not None:
             for key in keys:
                 idxs = self.params_env_idxs[key]
                 take_tuple = False
@@ -805,19 +796,19 @@ class SIRSAMDEnvSet:
                         v_tfbase = rotate(v=v_ffbase, ang=4.*np.pi/3.)
                         ###
                         new_vals = np.array([np.round(v_ffbase, 3), np.round(v_mfbase, 3), np.round(v_tfbase, 3)]*2)
-                        rgetattr(env.sim.model, key, None)[idxs] = new_vals
+                        rgetattr(env.unwrapped.sim.model, key, None)[idxs] = new_vals
                         ###
                     else:
                         try:
-                            rgetattr(env.sim.model, key, None)[idxs] = params[self.params_idxs[key]] * self.nominal_params[key]
+                            rgetattr(env.unwrapped.sim.model, key, None)[idxs] = params[self.params_idxs[key]] * self.nominal_params[key]
                             if "actuator_gainprm" in key:
                                 idxs = (idxs[0], 1)
-                                rgetattr(env.sim.model, key.replace("actuator_gainprm", "actuator_biasprm"), None)[idxs] = - params[self.params_idxs[key]] * self.nominal_params[key]
+                                rgetattr(env.unwrapped.sim.model, key.replace("actuator_gainprm", "actuator_biasprm"), None)[idxs] = - params[self.params_idxs[key]] * self.nominal_params[key]
                         except AttributeError:
                             rgetattr(env.unwrapped.model, key, None)[idxs] = params[self.params_idxs[key]] * self.nominal_params[key]
                 else:
                     try:
-                        rsetattr(env.sim.model, key, params[self.params_idxs[key]] * self.nominal_params[key])
+                        rsetattr(env.unwrapped.sim.model, key, params[self.params_idxs[key]] * self.nominal_params[key])
                     except AttributeError:
                         rsetattr(env.unwrapped.model, key, params[self.params_idxs[key]] * self.nominal_params[key])
 
@@ -839,10 +830,10 @@ class SIRSAMDEnvSet:
     def get_state(self):
         if "Pendulum" in self._env_name:
             st = self.getState(self.env_set[0])
-        elif getattr(self.env_set[0], "sim", None) is None:
+        elif getattr(self.env_set[0].unwrapped, "sim", None) is None:
             st = self.bullet_getState(self.env_set[0])
         else:
-            st = self.env_set[0].sim.get_state()
+            st = self.env_set[0].unwrapped.sim.get_state()
         return st
 
     def set_state(self, st):
@@ -852,19 +843,19 @@ class SIRSAMDEnvSet:
                 s = self.getState(env)
                 assert (np.round(s[0], 8) == np.round(st[0], 8)).all(), "{} != {}".format(s[0], st[0])
                 assert (np.round(s[1], 8) == np.round(st[1], 8)).all(), "{} != {}".format(s[1], st[1])
-            elif getattr(self.env_set[0], "sim", None) is None:
+            elif getattr(self.env_set[0].unwrapped, "sim", None) is None:
                 self.bullet_setState(st.qpos, st.qvel, env)
                 s = self.bullet_getState(env)
                 assert (np.round(s.qpos, 8) == np.round(st.qpos, 8)).all(), "{} != {}".format(s.qpos, st.qpos)
                 assert (np.round(s.qvel, 8) == np.round(st.qvel, 8)).all(), "{} != {}".format(s.qvel, st.qvel)
             else:
                 try:
-                    env.set_state(st.qpos, st.qvel)
-                    s = env.sim.get_state()
+                    env.unwrapped.set_state(st.qpos, st.qvel)
+                    s = env.unwrapped.sim.get_state()
                 except TypeError as err:
                     ## DClaw
-                    env.sim.set_state(st)
-                    s = env.sim.get_state()
+                    env.unwrapped.sim.set_state(st)
+                    s = env.unwrapped.sim.get_state()
                 assert (np.round(s.qpos, 8) == np.round(st.qpos, 8)).all(), "{} != {}".format(s.qpos, st.qpos)
                 assert (np.round(s.qvel, 8) == np.round(st.qvel, 8)).all(), "{} != {}".format(s.qvel, st.qvel)
 
@@ -888,10 +879,9 @@ class SIRSAMDEnvSet:
                 raise NotImplementedError
         return self.varpis, self.env_params
 
-    def sample_env_params(self):
+    def sample_env_params(self, use_varpi=False):
         ########
         if self.env_params is None:
-            #self.env_params = self.subdomains.sample_from_domains()
             _ = self.sample_varpis(type="continuous")
             assert self.env_params.shape[0] == self.n_regions, "{} vs {}".format(self.env_params.shape, self.n_regions)
         ###
@@ -913,10 +903,10 @@ class SIRSAMDEnvSet:
             state, _ = self.env_set[idx].reset()
             if "Pendulum" in self._env_name:
                 st = self.getState(self.env_set[idx])
-            elif getattr(self.env_set[idx], "sim", None) is None:
+            elif getattr(self.env_set[idx].unwrapped, "sim", None) is None:
                 st = self.bullet_getState(self.env_set[idx])
             else:
-                st = self.env_set[idx].sim.get_state()
+                st = self.env_set[idx].unwrapped.sim.get_state()
             #####
             for i, env in enumerate(self.env_set):
                 if i != idx:
@@ -926,19 +916,19 @@ class SIRSAMDEnvSet:
                         s = self.getState(env)
                         assert (np.round(s[0], 8) == np.round(st[0], 8)).all(), "{} != {}".format(s[0], st[0])
                         assert (np.round(s[1], 8) == np.round(st[1], 8)).all(), "{} != {}".format(s[1], st[1])
-                    elif getattr(self.env_set[idx], "sim", None) is None:
+                    elif getattr(self.env_set[idx].unwrapped, "sim", None) is None:
                         self.bullet_setState(st.qpos, st.qvel, env)
                         s = self.bullet_getState(env)
                         assert (np.round(s.qpos, 8) == np.round(st.qpos, 8)).all(), "{} != {}".format(s.qpos, st.qpos)
                         assert (np.round(s.qvel, 8) == np.round(st.qvel, 8)).all(), "{} != {}".format(s.qvel, st.qvel)
                     else:
                         try:
-                            env.set_state(st.qpos, st.qvel)
-                            s = env.sim.get_state()
+                            env.unwrapped.set_state(st.qpos, st.qvel)
+                            s = env.unwrapped.sim.get_state()
                         except TypeError as err:
                             ## DClaw
-                            env.sim.set_state(st)
-                            s = env.sim.get_state()
+                            env.unwrapped.sim.set_state(st)
+                            s = env.unwrapped.sim.get_state()
                         assert (np.round(s.qpos, 8) == np.round(st.qpos, 8)).all(), "{} != {}".format(s.qpos, st.qpos)
                         assert (np.round(s.qvel, 8) == np.round(st.qvel, 8)).all(), "{} != {}".format(s.qvel, st.qvel)
             ####
@@ -968,7 +958,7 @@ class SIRSAMDEnvSet:
             for i, env in enumerate(self.env_set):
                 if i != idx:
                     _ = env.reset()
-                    env.set_state(st[0], st[1])
+                    env.unwrapped.set_state(st[0], st[1])
                     s = (env.data.qpos, env.data.qvel)
                     assert (np.round(s[0], 8) == np.round(st[0], 8)).all(), "{} != {}".format(s[0], st[0])
                     assert (np.round(s[1], 8) == np.round(st[1], 8)).all(), "{} != {}".format(s[1], st[1])

@@ -24,6 +24,8 @@ parser.add_argument('--use_ut', action='store_true', help='Set agent to use the 
 parser.add_argument('--explicit_scal', action='store_true', help='Whether to use explicit scalarization for the critic (default: False)')
 parser.add_argument('--just_run_test_target', action='store_true', help='Only evaluate trained policy. (default: False)')
 parser.add_argument('--multi_dim', action='store_true', help="Use high dimension (i.e. > 2) parameter space. (default: False)")
+parser.add_argument('--use_solver', action='store_true', help='Set uMDSAC agent to use a solver (i.e. selects uMDSAC-v2 instead of uMDSAC-v1) (default: False)')
+parser.add_argument('--use_her', action='store_true', help='Set algorithm to use Hindsight Experience Replay (default: False)')
 ##
 args = parser.parse_args()
 
@@ -113,6 +115,10 @@ def get_sac_cmd(algo, seed):
             cmd += " --just_run_test_target"
         if args.multi_dim:
             cmd += " --multi_dim"
+        if args.use_her:
+            cmd += " --use_her"
+        if args.use_solver:
+            cmd += " --use_solver"
     else:
         raise NotImplementedError
     #####

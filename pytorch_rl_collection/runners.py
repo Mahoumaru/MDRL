@@ -14,6 +14,9 @@ from pytorch_rl_collection.sac_codes.emdsac.emdsac_algo import run_emdsac_algori
 from pytorch_rl_collection.sac_codes.sirsa.sirsa_algo import run_sirsa_algorithm
 ##### SMD SIRSA
 from pytorch_rl_collection.sac_codes.umd_sirsa.umd_sirsa_algo import run_umd_sirsa_algorithm
+################################################################################
+##### JOINT ALGORITHM
+from pytorch_rl_collection.sac_codes.mdsac.mdsac_algo import run_mdsac_algorithm
 
 ################################################################################
 RUNNER_FUNCTIONS_DICT = {
@@ -31,4 +34,12 @@ RUNNER_FUNCTIONS_DICT = {
 
 ################################################################################
 def get_runner(algo_name="ddpg"):
-    return RUNNER_FUNCTIONS_DICT[algo_name]
+    #return RUNNER_FUNCTIONS_DICT[algo_name]
+    if algo_name == "sac":
+        return run_sac_algorithm
+    elif "sac" in algo_name or "umd" in algo_name:
+        return run_mdsac_algorithm
+    elif algo_name == "sirsa":
+        return run_sirsa_algorithm
+    else:
+        raise NotImplementedError

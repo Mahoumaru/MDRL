@@ -50,6 +50,7 @@ def mdsac_arguments():
     parser.add_argument('--num_evals', default=1, type=int, help='If save_best is enabled, defines the number of evaluation to perform to assess the model performance (default: 10)')
     parser.add_argument('--resample', action='store_true', help='Re-sample the environment at each time step. (default: False)')
     parser.add_argument('--just_run_test_target', action='store_true', help='Only evaluate trained policy. (default: False)')
+    parser.add_argument('--use_her', action='store_true', help='Set algorithm to use Hindsight Experience Replay (default: False)')
     ## Used by the sac agent
     parser.add_argument('--warmup', default=100, type=int, help='Time without training but only filling the replay memory (default: 100)')
     parser.add_argument('--rel_mass_range', default=[0.5, 2.], type=lambda s: [float(item) for item in s.split(',')], help='Range of relative mass (default: [0.5, 2])')
@@ -74,5 +75,6 @@ def mdsac_arguments():
     parser.add_argument('--n_regions', default=10, type=int, help='Number of subdomains (default: 10)')
     parser.add_argument('--continuous', action='store_true', help='Run with continuous varpi distribution. (default: False)')
     parser.add_argument('--no_encoding', action='store_true', help="Don't employ the encoded parameters. (default: False)")
+    parser.add_argument('--use_solver', action='store_true', help='Set uMDSAC agent to use a solver (i.e. selects uMDSAC-v2 instead of uMDSAC-v1) (default: False)')
 
     return parser.parse_args()
