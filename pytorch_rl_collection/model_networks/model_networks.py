@@ -3,6 +3,8 @@ import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
 
+from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
+
 from torch.distributions import Normal
 from torch.distributions.utils import _standard_normal
 
@@ -43,13 +45,29 @@ def zero_weights_init_(m):
             th.nn.init.constant_(m.bias, 0)
 
 ###########################################
+def linear_weights_init(m):
+    if isinstance(m, nn.Linear):
+        stdv = 1. / np.sqrt(m.weight.size(1))
+        m.weight.data.uniform_(-stdv, stdv)
+        if m.bias is not None:
+            m.bias.data.uniform_(-stdv, stdv)
+
+###########################################
+def conv_weights_init(m):
+    if isinstance(m, nn.Conv2d):
+        th.nn.init.xavier_uniform_(m.weight.data)
+        if m.bias is not None:
+            th.nn.init.zeros_(m.bias)
+
+###########################################
 class SacActor(nn.Module):
-    def __init__(self, nb_states, nb_actions, nb_varpi=0, hidden_layers=[256, 256], policy_type="Gaussian", per_layer_varpi=False):
+    def __init__(self, nb_states, nb_actions, nb_varpi=0, hidden_layers=[256, 256], policy_type="Gaussian", VarGrad=False, per_layer_varpi=False):
         assert policy_type in ["Deterministic", "Gaussian"]
         super(SacActor, self).__init__()
         self._nb_states = nb_states
         self._nb_varpi = nb_varpi
         self.policy_type = policy_type
+        self.VarGrad = VarGrad
         layers = []
         self.per_layer_varpi = per_layer_varpi
         concat_dim = 0
@@ -109,6 +127,8 @@ class SacActor(nn.Module):
             ###
             normal = Normal(mean, log_std.exp())
             xt = normal.rsample()
+            if self.VarGrad:
+                normal = Normal(mean.detach(), log_std.exp().detach())
             log_prob = normal.log_prob(xt)
             out = th.tanh(xt)
             log_prob -= th.log(1. - out.square() + 1e-6) # Enforcing action bounds
@@ -116,6 +136,25 @@ class SacActor(nn.Module):
             mean = th.tanh(mean)
             ###
             return out, log_prob, mean
+
+    def get_deterministic_action(self, x):
+        if self.policy_type == "Deterministic":
+            return self(x)
+        else:
+            out = (x,)
+            ######
+            N = self._network_size
+            for i, fc in enumerate(self.network):
+                if i < N - 2:
+                    out = (F.relu(fc(*out)),)
+                else:
+                    break
+            ####
+            out = out[0]
+            mean = self.network[-2](out)
+            mean = th.tanh(mean)
+            ###
+            return None, None, mean
 
     def get_standard_normal(self, sample_shape):
         return _standard_normal(sample_shape, dtype=self.network[0].weight.dtype, device=self.network[0].weight.device)
@@ -185,6 +224,210 @@ class SacActor(nn.Module):
             return normal.loc, normal.scale
 
 ###########################################
+## Adapted from https://github.com/maywind23/LSTM-RL/blob/master/common/policy_networks.py#L366
+class SacActorLSTM(nn.Module):
+    def __init__(self, nb_states, nb_actions, hidden_layers=[256, 256], policy_type="Gaussian", init_w=3e-3):
+        assert policy_type in ["Gaussian"]#["Deterministic", "Gaussian"]
+        super(SacActorLSTM, self).__init__()
+        ######
+        self.policy_type = policy_type
+        ######
+        layers = []
+        assert len(hidden_layers) == 2, "The LSTM Actor hidden_layers should \
+            have 2 elements. Got {} of length {}".format(hidden_layers, len(hidden_layers))
+        #assert hidden_layers[0] == hidden_layers[1], "Both elements of the hidden_layers should \
+        #    be equal. Got {} instead".format(hidden_layers)
+        layers.append(nn.Linear(nb_states, hidden_layers[0])) # branch 1 FC
+        layers.append(nn.Linear(nb_states + nb_actions, hidden_layers[0])) # branch 2 FC
+        layers.append(nn.LSTM(hidden_layers[0], hidden_layers[-1])) # branch 2 LSTM
+        layers.append(nn.Linear(hidden_layers[0]+hidden_layers[-1], hidden_layers[-1])) # Merged FC
+        layers.append(nn.Linear(hidden_layers[-1], hidden_layers[-1]))
+        ### Mean and standard deviation
+        layers.append(nn.Linear(hidden_layers[-1], nb_actions))
+        if policy_type == "Gaussian":
+            layers.append(nn.Linear(hidden_layers[-1], nb_actions))
+            self._n = 2
+        else:
+            self._n = 1
+        ####
+        self.network = nn.ModuleList(layers)
+        self._network_size = len(self.network)
+        ###
+        # Only the output layer seems to have a specific weights initialization
+        for i in range(self._n):
+            #self.network[-self._n+i].apply(weights_init_)
+            self.network[-self._n+i].weight.data.uniform_(-init_w, init_w)
+            if self.network[-self._n+i].bias is not None:
+                self.network[-self._n+i].bias.data.uniform_(-init_w, init_w)
+        #self.network[-2].apply(weights_init_)
+        #self.network[-1].apply(weights_init_)
+
+    def forward(self, state, last_action, hidden_in, lengths=None):
+        """
+        state shape: (batch_size, sequence_length, state_dim)
+        output shape: (batch_size, sequence_length, action_dim)
+            for lstm, both needs to be permuted as: (sequence_length, batch_size, -1)
+        hidden_in: Tuple (h0, c0) for LSTM initialization, each of shape (1, batch_size, hidden_size)
+        lengths: (Optional) 1D tensor or list of actual episode lengths (before padding) for each sample in the
+            batch. If provided, it is used with pack_padded_sequence so that the LSTM ignores the padded part.
+        """
+        state = state.permute(1,0,2) # (T, B, state_dim)
+        last_action = last_action.permute(1,0,2) # (T, B, action_dim)
+        # branch 1
+        fc_branch = F.relu(self.network[0](state)) # (T, B, hidden_layers[0])
+        # branch 2
+        lstm_branch = th.cat([state, last_action], -1) # (T, B, state_dim+action_dim)
+        lstm_branch = F.relu(self.network[1](lstm_branch)) # (T, B, hidden_layers[0])
+        if lengths is None:
+            lstm_branch, lstm_hidden = self.network[2](lstm_branch, hidden_in)  # no activation after lstm
+        else:
+            # lengths must be on CPU and be a 1D tensor or list.
+            packed_input = pack_padded_sequence(lstm_branch, lengths, enforce_sorted=False)
+            lstm_branch, lstm_hidden = self.network[2](packed_input, hidden_in)  # no activation after lstm
+            # Unpack the sequence back to (T, B, hidden_layers[1])
+            lstm_branch, _ = pad_packed_sequence(lstm_branch, total_length=fc_branch.shape[0])
+        # merged
+        merged_branch=th.cat([fc_branch, lstm_branch], -1)
+        x = F.relu(self.network[3](merged_branch))
+        x = F.relu(self.network[4](x))
+        x = x.permute(1,0,2)  # permute back
+
+        mean    = self.network[-self._n](x)
+        # mean    = F.leaky_relu(self.network[-2](x))
+        if self.policy_type == "Gaussian":
+            log_std = self.network[-self._n+1](x)
+            log_std = th.clamp(log_std, min=LOG_SIG_MIN, max=LOG_SIG_MAX)
+        else:
+            log_std = None
+
+        return mean, log_std, lstm_hidden
+
+    def evaluate(self, state, last_action, hidden_in, lengths):
+        '''
+        generate sampled action with state as input wrt the policy network;
+        '''
+        mean, log_std, hidden_out = self.forward(state, last_action, hidden_in, lengths)
+        ####
+        if self.policy_type == "Gaussian":
+            normal = Normal(mean, log_std.exp())
+            xt = normal.rsample()
+            log_prob = normal.log_prob(xt)
+            action = th.tanh(xt)
+            log_prob -= th.log(1. - action.square() + 1e-6) # Enforcing action bounds
+            log_prob = log_prob.sum(-1, keepdim=True)
+            mean = th.tanh(mean)
+            return action, log_prob, mean, hidden_out
+        else:
+            return None, None, th.tanh(mean), hidden_out
+
+    def get_action(self, state, last_action, hidden_in, lengths):
+        action, _, mean, hidden_out = self.evaluate(state, last_action, hidden_in, lengths)
+        #return action[0][0], hidden_out
+        return action, mean, hidden_out
+
+###########################################
+## Adapted from https://github.com/maywind23/LSTM-RL/blob/master/common/policy_networks.py
+class SacActorGRU(nn.Module):
+    def __init__(self, nb_states, nb_actions, hidden_layers=[256, 256], policy_type="Gaussian", init_w=3e-3):
+        assert policy_type in ["Deterministic", "Gaussian"]
+        super(SacActorGRU, self).__init__()
+        ######
+        self.policy_type = policy_type
+        ######
+        layers = []
+        assert len(hidden_layers) == 2, "The GRU Actor hidden_layers should \
+            have 2 elements. Got {} of length {}".format(hidden_layers, len(hidden_layers))
+        #assert hidden_layers[0] == hidden_layers[1], "Both elements of the hidden_layers should \
+        #    be equal. Got {} instead".format(hidden_layers)
+        layers.append(nn.Linear(nb_states, hidden_layers[0])) # branch 1 FC
+        layers.append(nn.Linear(nb_states + nb_actions, hidden_layers[0])) # branch 2 FC
+        layers.append(nn.GRU(hidden_layers[0], hidden_layers[-1])) # branch 2 GRU
+        layers.append(nn.Linear(hidden_layers[0]+hidden_layers[-1], hidden_layers[-1])) # Merged FC
+        layers.append(nn.Linear(hidden_layers[-1], hidden_layers[-1]))
+        ### Mean and standard deviation
+        layers.append(nn.Linear(hidden_layers[-1], nb_actions))
+        if policy_type == "Gaussian":
+            layers.append(nn.Linear(hidden_layers[-1], nb_actions))
+            self._n = 2
+        else:
+            self._n = 1
+        ####
+        self.network = nn.ModuleList(layers)
+        self._network_size = len(self.network)
+        ###
+        # Only the output layer seems to have a specific weights initialization
+        for i in range(self._n):
+            #self.network[-self._n+i].apply(weights_init_)
+            self.network[-self._n+i].weight.data.uniform_(-init_w, init_w)
+            if self.network[-self._n+i].bias is not None:
+                self.network[-self._n+i].bias.data.uniform_(-init_w, init_w)
+        #self.network[-2].apply(weights_init_)
+        #self.network[-1].apply(weights_init_)
+
+    def forward(self, state, last_action, hidden_in, lengths=None):
+        """
+        state shape: (batch_size, sequence_length, state_dim)
+        output shape: (batch_size, sequence_length, action_dim)
+            for lstm, both needs to be permuted as: (sequence_length, batch_size, -1)
+        hidden_in: Tuple (h0, c0) for LSTM initialization, each of shape (1, batch_size, hidden_size)
+        lengths: (Optional) 1D tensor or list of actual episode lengths (before padding) for each sample in the
+            batch. If provided, it is used with pack_padded_sequence so that the LSTM ignores the padded part.
+        """
+        state = state.permute(1,0,2)
+        last_action = last_action.permute(1,0,2)
+        # branch 1
+        fc_branch = F.relu(self.network[0](state))
+        # branch 2
+        gru_branch = th.cat([state, last_action], -1)
+        gru_branch = F.relu(self.network[1](gru_branch)) # (T, B, hidden_layers[0])
+        if lengths is None:
+            gru_branch, gru_hidden = self.network[2](gru_branch, hidden_in)  # no activation after lstm
+        else:
+            # lengths must be on CPU and be a 1D tensor or list.
+            packed_input = pack_padded_sequence(gru_branch, lengths, enforce_sorted=False)
+            gru_branch, gru_hidden = self.network[2](packed_input, hidden_in)  # no activation after lstm
+            # Unpack the sequence back to (T, B, hidden_layers[1])
+            gru_branch, _ = pad_packed_sequence(gru_branch, total_length=fc_branch.shape[0])
+        # merged
+        merged_branch=th.cat([fc_branch, gru_branch], -1)
+        x = F.relu(self.network[3](merged_branch))
+        x = F.relu(self.network[4](x))
+        x = x.permute(1,0,2)  # permute back
+
+        mean    = self.network[-self._n](x)
+        # mean    = F.leaky_relu(self.network[-2](x))
+        if self.policy_type == "Gaussian":
+            log_std = self.network[-self._n+1](x)
+            log_std = th.clamp(log_std, min=LOG_SIG_MIN, max=LOG_SIG_MAX)
+        else:
+            log_std = None
+
+        return mean, log_std, gru_hidden
+
+    def evaluate(self, state, last_action, hidden_in, lengths):
+        '''
+        generate sampled action with state as input wrt the policy network;
+        '''
+        mean, log_std, hidden_out = self.forward(state, last_action, hidden_in, lengths)
+        ####
+        if self.policy_type == "Gaussian":
+            normal = Normal(mean, log_std.exp())
+            xt = normal.rsample()
+            log_prob = normal.log_prob(xt)
+            action = th.tanh(xt)
+            log_prob -= th.log(1. - action.square() + 1e-6) # Enforcing action bounds
+            log_prob = log_prob.sum(-1, keepdim=True)
+            mean = th.tanh(mean)
+            return action, log_prob, mean, hidden_out
+        else:
+            return None, None, th.tanh(mean), hidden_out
+
+    def get_action(self, state, last_action, hidden_in, lengths):
+        action, _, mean, hidden_out = self.evaluate(state, last_action, hidden_in, lengths)
+        #return action[0][0], hidden_out
+        return action, mean, hidden_out
+
+###########################################
 class SacCritic(nn.Module):
     def __init__(self, nb_states, nb_actions, nb_varpi=0, output_dim=1, hidden_layers=[256, 256], per_layer_varpi=False):
         super(SacCritic, self).__init__()
@@ -219,6 +462,172 @@ class SacCritic(nn.Module):
             for i, fc in enumerate(self.network):
                 out = (F.relu(fc(*out)) if i < N - 1 else fc(*out),)
         return out[0]
+
+###########################################
+## Adapted from https://github.com/maywind23/LSTM-RL/blob/master/common/buffers.py
+class SacCriticLSTM(nn.Module):
+    """
+    Critic Q network with LSTM structure.
+    The network follows two-branch structure as in paper:
+    Sim-to-Real Transfer of Robotic Control with Dynamics Randomization
+    """
+    def __init__(self, nb_states, nb_actions, output_dim=1, hidden_layers=[256, 256]):
+        super(SacCriticLSTM, self).__init__()
+        ######
+        layers = []
+        assert len(hidden_layers) == 2, "The LSTM critic hidden_layers should \
+            have 2 elements. Got {} of length {}".format(hidden_layers, len(hidden_layers))
+        layers.append(nn.Linear(nb_states + nb_actions, hidden_layers[0])) # branch 1 FC
+        layers.append(nn.Linear(nb_states + nb_actions, hidden_layers[0])) # branch 2 FC
+        layers.append(nn.LSTM(hidden_layers[0], hidden_layers[1])) # branch 2 LSTM
+        layers.append(nn.Linear(2*hidden_layers[0], hidden_layers[1])) # Merged FC
+        layers.append(nn.Linear(hidden_layers[-1], output_dim))
+        self.network = nn.ModuleList(layers)
+        self._network_size = len(self.network)
+        ###
+        # Only the output layer seems to have a specific weights initialization
+        self.network[-1].apply(linear_weights_init)
+
+    def forward(self, state, action, last_action, hidden_in, lengths):
+        """
+        state shape: (batch_size, sequence_length, state_dim)
+        output shape: (batch_size, sequence_length, action_dim)
+            for lstm, both needs to be permuted as: (sequence_length, batch_size, -1)
+        hidden_in: Tuple (h0, c0) for LSTM initialization, each of shape (1, batch_size, hidden_size)
+        lengths: (Optional) 1D tensor or list of actual episode lengths (before padding) for each sample in the
+            batch. If provided, it is used with pack_padded_sequence so that the LSTM ignores the padded part.
+        """
+        state = state.permute(1,0,2)
+        action = action.permute(1,0,2)
+        last_action = last_action.permute(1,0,2)
+        # branch 1
+        fc_branch = th.cat([state, action], -1)
+        fc_branch = F.relu(self.network[0](fc_branch))
+        # branch 2
+        lstm_branch = th.cat([state, last_action], -1)
+        lstm_branch = F.relu(self.network[1](lstm_branch))  # linear layer for 3d input only applied on the last dim # (T, B, hidden_layers[0])
+        if lengths is None:
+            lstm_branch, lstm_hidden = self.network[2](lstm_branch, hidden_in)  # no activation after lstm
+        else:
+            # lengths must be on CPU and be a 1D tensor or list.
+            packed_input = pack_padded_sequence(lstm_branch, lengths, enforce_sorted=False)
+            lstm_branch, lstm_hidden = self.network[2](packed_input, hidden_in)  # no activation after lstm
+            # Unpack the sequence back to (T, B, hidden_layers[1])
+            lstm_branch, _ = pad_packed_sequence(lstm_branch, total_length=fc_branch.shape[0])
+        # merged
+        merged_branch=th.cat([fc_branch, lstm_branch], -1)
+
+        x = F.relu(self.network[3](merged_branch))
+        x = self.network[-1](x)
+        x = x.permute(1,0,2)  # back to same axes as input
+        return x, lstm_hidden    # lstm_hidden is actually tuple: (hidden, cell)
+
+###########################################
+## Adapted from https://github.com/maywind23/LSTM-RL/blob/master/common/buffers.py
+class SacCriticLSTM2(nn.Module):
+    """
+    Critic Q network with LSTM structure.
+    The network follows single-branch structure as in paper:
+    Memory-based control with recurrent neural networks
+    """
+    def __init__(self, nb_states, nb_actions, output_dim=1, hidden_layers=[256, 256]):
+        super(SacCriticLSTM2, self).__init__()
+        ######
+        layers = []
+        assert len(hidden_layers) == 2, "The LSTM critic hidden_layers should \
+            have 2 elements. Got {} of length {}".format(hidden_layers, len(hidden_layers))
+        layers.append(nn.Linear(nb_states + 2*nb_actions, hidden_layers[0])) # Single branch FC1
+        layers.append(nn.LSTM(hidden_layers[0], hidden_layers[1])) # Single branch LSTM
+        layers.append(nn.Linear(hidden_layers[0], hidden_layers[1])) # Single branch FC2
+        layers.append(nn.Linear(hidden_layers[-1], output_dim)) # Single branch FC3
+        self.network = nn.ModuleList(layers)
+        self._network_size = len(self.network)
+        ###
+        # Only the output layer seems to have a specific weights initialization
+        self.network[-1].apply(linear_weights_init)
+
+    def forward(self, state, action, last_action, hidden_in, lengths):
+        """
+        state shape: (batch_size, sequence_length, state_dim)
+        output shape: (batch_size, sequence_length, action_dim)
+            for lstm, both needs to be permuted as: (sequence_length, batch_size, -1)
+        hidden_in: Tuple (h0, c0) for LSTM initialization, each of shape (1, batch_size, hidden_size)
+        lengths: (Optional) 1D tensor or list of actual episode lengths (before padding) for each sample in the
+            batch. If provided, it is used with pack_padded_sequence so that the LSTM ignores the padded part.
+        """
+        seq_len = state.shape[1]
+        state = state.permute(1,0,2)
+        action = action.permute(1,0,2)
+        last_action = last_action.permute(1,0,2)
+        # single branch
+        x = th.cat([state, action, last_action], -1)
+        x = F.relu(self.network[0](x))# (T, B, hidden_layers[0])
+        if lengths is None:
+            x, lstm_hidden = self.network[1](x, hidden_in)  # no activation after lstm
+        else:
+            # lengths must be on CPU and be a 1D tensor or list.
+            packed_input = pack_padded_sequence(x, lengths, enforce_sorted=False)
+            x, lstm_hidden = self.network[1](packed_input, hidden_in)  # no activation after lstm
+            # Unpack the sequence back to (T, B, hidden_layers[1])
+            x, _ = pad_packed_sequence(x, total_length=seq_len)
+
+        x = F.relu(self.network[2](x))
+        x = self.network[3](x)
+        x = x.permute(1,0,2)  # back to same axes as input
+        return x, lstm_hidden    # lstm_hidden is actually tuple: (hidden, cell)
+
+###########################################
+class SacCriticGRU(nn.Module):
+    def __init__(self, nb_states, nb_actions, output_dim=1, hidden_layers=[256, 256]):
+        super(SacCriticGRU, self).__init__()
+        ######
+        layers = []
+        assert len(hidden_layers) == 2, "The GRU critic hidden_layers should \
+            have 2 elements. Got {} of length {}".format(hidden_layers, len(hidden_layers))
+        layers.append(nn.Linear(nb_states + nb_actions, hidden_layers[0])) # branch 1 FC
+        layers.append(nn.Linear(nb_states + nb_actions, hidden_layers[0])) # branch 2 FC
+        layers.append(nn.GRU(hidden_layers[0], hidden_layers[1])) # branch 2 GRU
+        layers.append(nn.Linear(2*hidden_layers[0], hidden_layers[1])) # Merged FC
+        layers.append(nn.Linear(hidden_layers[-1], output_dim))
+        self.network = nn.ModuleList(layers)
+        self._network_size = len(self.network)
+        ###
+        # Only the output layer seems to have a specific weights initialization
+        self.network[-1].apply(linear_weights_init)
+
+    def forward(self, state, action, last_action, hidden_in, lengths):
+        """
+        state shape: (batch_size, sequence_length, state_dim)
+        output shape: (batch_size, sequence_length, action_dim)
+            for gru, both needs to be permuted as: (sequence_length, batch_size, -1)
+        hidden_in: Tuple (h0, c0) for GRU initialization, each of shape (1, batch_size, hidden_size)
+        lengths: (Optional) 1D tensor or list of actual episode lengths (before padding) for each sample in the
+            batch. If provided, it is used with pack_padded_sequence so that the GRU ignores the padded part.
+        """
+        state = state.permute(1,0,2)
+        action = action.permute(1,0,2)
+        last_action = last_action.permute(1,0,2)
+        # branch 1
+        fc_branch = th.cat([state, action], -1)
+        fc_branch = F.relu(self.network[0](fc_branch))
+        # branch 2
+        gru_branch = th.cat([state, last_action], -1)
+        gru_branch = F.relu(self.network[1](gru_branch))  # linear layer for 3d input only applied on the last dim # (T, B, hidden_layers[0])
+        if lengths is None:
+            gru_branch, gru_hidden = self.network[2](gru_branch, hidden_in)  # no activation after gru
+        else:
+            # lengths must be on CPU and be a 1D tensor or list.
+            packed_input = pack_padded_sequence(gru_branch, lengths, enforce_sorted=False)
+            gru_branch, gru_hidden = self.network[2](packed_input, hidden_in)  # no activation after gru
+            # Unpack the sequence back to (T, B, hidden_layers[1])
+            gru_branch, _ = pad_packed_sequence(gru_branch, total_length=fc_branch.shape[0])
+        # merged
+        merged_branch=th.cat([fc_branch, gru_branch], -1)
+
+        x = F.relu(self.network[3](merged_branch))
+        x = self.network[-1](x)
+        x = x.permute(1,0,2)  # back to same axes as input
+        return x, gru_hidden    # gru_hidden is actually tuple: (hidden, cell)
 
 ###########################################
 class SacSolver(nn.Module):

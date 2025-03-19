@@ -60,6 +60,7 @@ def sirsa_algorithm(agent, env, args, np, use_encoder, output_path):
                 raise NotImplementedError
             ## + Sample varpi
             varpi = torch.FloatTensor(varpi).to(agent.device)
+            print(varpi, "; idx =", idx)
             ## + Preserve this original varpi
             orig_varpi = deepcopy(varpi)
             ## + With T = number of steps per episode
@@ -70,6 +71,7 @@ def sirsa_algorithm(agent, env, args, np, use_encoder, output_path):
             for t in count(0):
                 ## + Sample alpha from varpi
                 pre_not_dones = ~env.get_dones()
+                valid_idxs = env.get_stillActiveIdxs()
                 ## + Select action according to the actor and disturber, or
                 ## randomly during the warmup steps.
                 action = agent.select_action(state, varpi)
@@ -81,7 +83,7 @@ def sirsa_algorithm(agent, env, args, np, use_encoder, output_path):
                 # Ignore the "done" signal if it comes from hitting the time horizon.
                 # (https://github.com/openai/spinningup/blob/master/spinup/algos/sac/sac.py)
                 mask = np.ones(done.shape) if t+1 == env._max_episode_steps else (~done).astype(float)
-                agent.rmset_store_transition((state, action, reward, new_state, mask, I, orig_varpi.cpu().numpy()), valid_idxs=[idx])
+                agent.rmset_store_transition((state, action, reward, new_state, mask, I, orig_varpi.cpu().numpy()), valid_idxs=valid_idxs)
                 ## + With K the number of updates
                 ## for k = 1 to K do:
                 for k in range(args.number_of_updates):
@@ -198,7 +200,7 @@ def run_sirsa_algorithm(args):
     ######
     use_encoder = not args.no_encoding
     # - Initialize the environment
-    env = SIRSAMDEnvSet(env_name=args.env_name, multi_dim=args.multi_dim, n_regions=args.n_regions, seed=args.seed, use_encoder=use_encoder,
+    env = SIRSAMDEnvSet(env_name=args.env_name, multi_dim=args.multi_dim, n_regions=1, n_varpis=args.n_regions, seed=args.seed, use_encoder=use_encoder,
         add_noise=False, use_quasi_random=False
     )
     #print(env._max_episode_steps)
@@ -231,14 +233,15 @@ def run_sirsa_algorithm(args):
     date[2] = date[2] if len(date[2]) > 1 else "0"+date[2]
     date[1] = date[1] if len(date[1]) > 1 else "0"+date[1]
     if not args.just_run_test_target:
-        output_path_suffix = "_20240802"
+        output_path_suffix = "_20240710" if args.multi_dim else "_20240802"
     else:
-        output_path_suffix = "_20240710"
+        output_path_suffix = "_20240710" if args.multi_dim else "_20240802"
     ###
     algo = args.algo + ("_UT" if args.use_ut else "_MC") + ("_EX" if args.explicit_scal else "_IMP") + ("_resample" if args.resample else "") + ("_cont" if args.continuous else "_disc")
     env_key_list = list(env.params_idxs.keys())
+    cvar_suffix = "_cvar{}".format(str(args.cvar_alpha).replace(".", "p")) if args.use_cvar else ""
     output_path = "./trained_agents/{}/{}_{}/{}/".format(
-        algo + (("_" + model_type) if model_type != "" else ""),
+        algo + (("_" + model_type) if model_type != "" else "") + cvar_suffix,
         args.env_name + ("_ObsNoise" if add_observation_noise else ""),
         ("all" if len(env_key_list) > 2 else "_".join(env_key_list)) + output_path_suffix,# +"_2000ep_true_truesirsa",
         args.seed
@@ -254,7 +257,7 @@ def run_sirsa_algorithm(args):
     ################
     ################
     from pytorch_rl_collection.test_target_env import run_test_target
-    use_osi = False
+    use_osi = True
     run_test_target(actor=agent.actor, output_path=output_path, env_name=args.env_name, algo_name=args.algo,
             actor_seed=args.seed, dim=domains_dim, osi_net=agent.systemID,
             ccs=True, continuous=args.continuous, use_osi=use_osi, save_results=True, use_encoder=use_encoder,

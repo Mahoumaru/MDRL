@@ -13,6 +13,7 @@ mpl.use("Agg")
 import matplotlib.pyplot as plt
 #import seaborn as sns
 
+import random
 from scipy.special import gamma
 
 from functools import reduce as functools_reduce
@@ -24,6 +25,9 @@ import errno
 import shutil
 import fnmatch
 from collections import deque
+
+from collections import defaultdict
+from typing import DefaultDict
 
 ###########################################
 def interquartile_mean(x, axis=0):
@@ -247,9 +251,9 @@ def estimate_cvar(returns, alpha, numpify=False):
         returns = torch.FloatTensor(returns)
         numpify = True
     sorted_returns = torch.sort(returns, dim=0).values
-    index = int(alpha * len(returns))
-    cvar = torch.mean(sorted_returns[:index+1], dim=0) # max q
-    #cvar = torch.mean(sorted_returns[index:], dim=0) # min q
+    index = max(int(alpha * len(returns)), 1) # ensure at least 1
+    cvar = torch.mean(sorted_returns[:index], dim=0) # if trying to max q
+    #cvar = torch.mean(sorted_returns[index:], dim=0) # if trying to min q
     #print(returns.shape, cvar.shape)
     return cvar.squeeze().numpy() if numpify else cvar
 
@@ -272,6 +276,59 @@ def min_fct(x, y):
     """
     abs_val = (y - x).square().sqrt() # replaces "(y - x).abs()"
     return 0.5 * (x + y - abs_val)
+
+###########################################
+class TSoft_Update:
+    def __init__(self, tau, dof=1., eps=1e-8, name="Target_Updater"):
+        self.dof = dof
+        self.tau = tau
+        self.eps = eps
+        #####
+        if tau == 1.:
+            self.target_update = self.hard_update
+            print("++ {} set to use Hard update".format(name))
+        elif dof == np.inf:
+            self.target_update = self.soft_update
+            print("++ {} set to use Soft update".format(name))
+        else:
+            self.target_update = self.tsoft_update
+            print("++ {} set to use t-Soft update".format(name))
+        #####
+        self.state: DefaultDict[torch.Tensor, Any] = defaultdict(dict)
+
+    def tsoft_update(self, target, source, tau=None):
+        for id, (target_param, param) in enumerate(zip(target.parameters(), source.parameters())):
+            state = self.state[id]
+            # State initialization
+            if len(state) == 0:
+                state["W_t"] = (1. - self.tau) / self.tau
+                state["sigma_sq"] = torch.zeros(1, device=target_param.data.device) + self.eps
+            ####
+            dof = self.dof
+            sigma_sq = state["sigma_sq"]
+            Wt = state['W_t']
+            D_ = target_param.data.sub(param.data).square_().mean()#.item()
+            wt = (1. + dof) / (D_.div(sigma_sq + self.eps) + dof)
+            tau_w = wt / (Wt + wt)
+            ####
+            target_param.data.copy_(
+                target_param.data * (1. - tau_w) + param.data * tau_w
+            )
+            ####
+            tau_sig_w = wt * self.tau * dof / (1. + dof)
+            state["sigma_sq"] = (1. - tau_sig_w) * sigma_sq + tau_sig_w * D_
+            ####
+            state['W_t'] = (1. - self.tau) * (Wt + wt)
+
+    def soft_update(self, target, source, tau):
+        for target_param, param in zip(target.parameters(), source.parameters()):
+            target_param.data.copy_(
+                target_param.data * (1.0 - tau) + param.data * tau
+            )
+
+    def hard_update(self, target, source, tau=None):
+        for target_param, param in zip(target.parameters(), source.parameters()):
+                target_param.data.copy_(param.data)
 
 ###########################################
 def soft_update(target, source, tau):
@@ -613,6 +670,92 @@ class DotDict(dict):
     __getattr__ = dict.get
     __setattr__ = dict.__setitem__
     __delattr__ = dict.__delitem__
+
+##################################################
+# From https://github.com/robtandy/randomdict/blob/b3cba5ec51d583b81e599ead2680075194c01d5b/randomdict.py
+class RandomDict(dict):
+    def __init__(self, seed=None, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._keys = {}  # Maps keys to their index in _random_vector
+        self._random_vector = []
+        self.last_index = -1
+        self.rng = random.Random(seed)
+
+        # Populate _keys and _random_vector along with the inherited dict
+        for key in self.keys():
+            self._random_vector.append(key)
+            self.last_index += 1
+            self._keys[key] = self.last_index
+
+    def copy(self):
+        """ Return a shallow copy of the RandomDict """
+        new_rd = RandomDict(super().copy())
+        new_rd._keys = self._keys.copy()
+        new_rd._random_vector = self._random_vector[:]
+        new_rd.last_index = self.last_index
+        return new_rd
+
+    @classmethod
+    def fromkeys(cls, keys, value=None):
+        """Create a RandomDict from an iterable of keys, all mapped to the same value."""
+        rd = cls()
+        for key in keys:
+            rd[key] = value
+        return rd
+
+    def __setitem__(self, key, value):
+        """ Insert or update a key-value pair """
+        super().__setitem__(key, value)
+        i = self._keys.get(key, -1)
+
+        if i == -1:
+            # Add new key
+            self.last_index += 1
+            self._random_vector.append(key)
+            self._keys[key] = self.last_index
+
+    def __delitem__(self, key):
+        """ Delete item by swapping with the last element in the random vector """
+        if key not in self._keys:
+            raise KeyError(key)
+
+        # Get the index of the item to delete
+        i = self._keys[key]
+
+        # Remove the last item from the random vector
+        move_key = self._random_vector.pop()
+
+        # Only swap if we are not deleting the last item
+        if i != self.last_index:
+            # Move the last item into the location of the deleted item
+            self._random_vector[i] = move_key
+            self._keys[move_key] = i
+
+        self.last_index -= 1
+        del self._keys[key]
+        super().__delitem__(key)
+
+    def random_key(self):
+        """ Return a random key from this dictionary in O(1) time """
+        if len(self) == 0:
+            raise KeyError("RandomDict is empty")
+        i = self.rng.randint(0, self.last_index)
+        return self._random_vector[i]
+
+    def get_key_from_idx(self, idx):
+        return self._random_vector[idx]
+
+    def get_idx_from_key(self, key):
+        return self._keys[key]
+
+    def random_value(self):
+        """ Return a random value from this dictionary in O(1) time """
+        return self[self.random_key()]
+
+    def random_item(self):
+        """ Return a random key-value pair from this dictionary in O(1) time """
+        k = self.random_key()
+        return k, self[k]
 
 ##################################################
 class MultiDimSubDomains:

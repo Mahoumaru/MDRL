@@ -1,0 +1,7 @@
+python launcher.py --algos umdsac --env_name DClawTurnFixed-v0 --n_runs 1 --continuous --n_regions 1 --no_encoding --use_ut --explicit_scal --use_her --use_cvar --cvar_alpha 0.02 --cvar_samples 50 --use_solver --first_run_idx 0
+
+python launcher.py --algos sirsa --env_name DClawTurnFixed-v0 --n_runs 1 --continuous --n_regions 100 --no_encoding --use_ut --explicit_scal --use_her --use_cvar --cvar_alpha 0.02 --cvar_samples 50 --use_solver --first_run_idx 0
+
+python launcher.py --algos umdsac --env_name DClawTurnFixed-v0 --n_runs 1 --continuous --n_regions 1 --no_encoding --use_ut --explicit_scal --use_her --use_solver --first_run_idx 0
+
+python launcher.py --algos sirsa --env_name Walker2d-v3 --n_runs 1 --continuous --n_regions 100 --no_encoding --use_ut --explicit_scal --use_her --use_solver --first_run_idx 0

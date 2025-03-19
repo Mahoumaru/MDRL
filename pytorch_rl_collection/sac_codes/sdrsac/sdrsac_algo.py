@@ -7,33 +7,15 @@ from datetime import datetime
 
 from copy import deepcopy
 
-from hilbertcurve.hilbertcurve import HilbertCurve
-from collections import defaultdict
-
-# Map samples to Hilbert indices
-def get_hilbert_indices(hilbert_curve, samples, bin_size):
-    hilbert_indices = []
-    for sample in samples:
-        scaled_sample = [int(coord // bin_size) for coord in sample]
-        hilbert_index = hilbert_curve.distance_from_point(scaled_sample)
-        hilbert_indices.append(hilbert_index)
-    return hilbert_indices
-
-# Update counters for the samples
-def update_counters(hilbert_curve, samples, bin_size, counters):
-    hilbert_indices = get_hilbert_indices(hilbert_curve, samples, bin_size)
-    for index in hilbert_indices:
-        counters[index] += 1
-    return counters
-
-def emdsac_algorithm(agent, env, args, np, use_encoder, output_path):
-    algo_name_upper = (args.algo + ("_UT" if args.use_ut else "_MC") + ("_EX" if args.explicit_scal else "_IMP")).upper()
+def sdrsac_algorithm(agent, env, args, np, output_path_suffix, use_encoder, output_path):
+    algo_name_upper = args.algo.upper()
+    #output_path = "./trained_agents/{}/{}_armature/{}/".format(algo, args.env_name, args.seed)
     make_Dirs(output_path + "checkpoint/")
     if args.save_best:
         make_Dirs(output_path + "best/")
     #####
     eval_envs = []
-    for j in range(2):
+    for j in range(1):
         eval_env = deepcopy(env.env_set[0])
         try:
             eval_env.reset(seed=args.seed)
@@ -44,74 +26,53 @@ def emdsac_algorithm(agent, env, args, np, use_encoder, output_path):
     #####
     train_csv_writing_mode = 'w'
     eval_csv_writing_mode = 'w'
-    sampled_params_writing_mode = 'w'
-    mb_params_writing_mode = 'w'
     #####
+    eval_count = 0
+    eval_rate = (args.total_num_steps // (100 * env._max_episode_steps))
     ## + Randomly initialize actor, disturber and the two critic networks
     agent.initialize_critics()
     agent.initialize_actor()
-    agent.initialize_solver()
     ## + Initialize entropy temperature parameters \alpha
     agent.initialize_entropy_temperature()
+    ## + Initialize lambda and steplength
+    agent.initialize_lambda()
     ## + Initialize target networks and affect to them the same weights as the two critics
     ## networks previously initialized
     agent.initialize_targets()
-    ## +
-    agent.initialize_systemID()
-    ## +
-    #agent.initialize_dynamics_net()
+    ## + Initialize dynamics and reward networks
+    agent.initialize_world_model()
     ## + Initialize the replay buffer
     agent.initialize_replay_buffer_set(size=args.n_regions)
     ## +
     agent.set_varpi_ranges(env.subdomains.ranges)
-    ## + Initialize OSI and Dynamics networks
-    #agent.initialize_osi_dyn()
-    ## + Initialize homotopy parameter
-    #agent.initialize_lambda()
-    #########
-    p = 4  # Order of the Hilbert curve (2^p bins per dimension)
-    bin_size = 1/(2**p)  # Size of each bin
-    hilbert_curve = HilbertCurve(p, agent.varpi_size // 2)
-    # Initialize counters
-    counters = defaultdict(int)
-    #########
     ###
     if not args.just_run_test_target:
         ## + With M = total_num_episodes
         ## for episode = 1 to M do:
         i_episode = 0
-        #total_num_episodes = 2 * (args.total_num_steps // env._max_episode_steps)
         #for i_episode in range(1, total_num_episodes+1):
         while agent.steps < args.total_num_steps:
             i_episode += 1
+            ## + Sample varpi
+            #_ = env.sample_varpis()
             ## + Receive initial observation (with reset of course)
             state = env.reset()
             ## + Sample degen varpi or param
-            if agent.continuous:
-                I = env.sample_env_params(use_varpi=False)
-            else:
-                I = np.eye(env.n_regions)
-                _ = env.sample_env_params(use_varpi=False)
-            ## + Sample varpi
-            varpi = agent.sample_varpis(kappas=I)#(size=1)#
-            ## + Preserve this original varpi
-            orig_varpi = deepcopy(varpi)
+            I = env.sample_env_params(use_varpi=False)
             ## + With T = number of steps per episode
             ## (note that T can be different for each episode, so we use an infinite loop and break when done)
             ## for t = 1 to T do:
             episode_rewards = np.zeros(env.n_regions)
-            episode_loss = 0.
             done = False
             for t in count(0):
                 ## + Sample alpha from varpi
                 pre_not_dones = ~env.get_dones()
                 valid_idxs = env.get_stillActiveIdxs()
                 if args.resample:
-                    I = env.sample_env_params(use_varpi=False)
+                    _ = env.sample_env_params(use_varpi=False)
                 ## + Select action according to the actor and disturber, or
                 ## randomly during the warmup steps.
-                #action = agent.select_action(state, np.concatenate((I, np.zeros_like(I)), axis=-1))#
-                action = agent.select_action(state, varpi, kappa=None)
+                action = agent.select_action(state)
                 ## + Execute the action and observe reward r_t, new state and done signal
                 new_state, reward, done, _, _ = env.step(action)
                 #print(new_state.shape, done.shape, varpi.shape, reward.shape, episode_rewards.shape, pre_not_dones.shape)
@@ -121,18 +82,17 @@ def emdsac_algorithm(agent, env, args, np, use_encoder, output_path):
                 # Ignore the "done" signal if it comes from hitting the time horizon.
                 # (https://github.com/openai/spinningup/blob/master/spinup/algos/sac/sac.py)
                 mask = np.ones(done.shape) if t+1 == env._max_episode_steps else (~done).astype(float)
-                agent.rmset_store_transition((state, action, reward, new_state, mask, I, orig_varpi.cpu().numpy()), valid_idxs=valid_idxs)
+                agent.rmset_store_transition((state, action, reward, new_state, mask, I, None), valid_idxs=valid_idxs)
                 ## + With K the number of updates
                 ## for k = 1 to K do:
                 for k in range(args.number_of_updates):
                     ## + Sample a random minibatch of N transitions (s_i, a_i, r_i, s_{i+1}) from the replay buffer R
                     ## (This is only possible if there are at least N transitions in the replay buffer)
                     minibatch_states = None
-                    for mb_s, mb_a, mb_r, mb_ns, mb_m, mb_p, mb_v in agent.rmset_sample_minibatch(batch_size=args.batch_size):
+                    for mb_s, mb_a, mb_r, mb_ns, mb_m, mb_p in agent.rmset_sample_minibatch(batch_size=args.batch_size):
                         if minibatch_states is None:
                             minibatch_states, minibatch_actions, minibatch_rewards, minibatch_new_states, \
-                            minibatch_masks, minibatch_kappas, HER_varpis = mb_s, mb_a, \
-                            mb_r, mb_ns, mb_m, mb_p, mb_v
+                            minibatch_masks, minibatch_kappas = mb_s, mb_a, mb_r, mb_ns, mb_m, mb_p
                         else:
                             minibatch_states = torch.cat((minibatch_states, mb_s), dim=0)
                             minibatch_actions = torch.cat((minibatch_actions, mb_a), dim=0)
@@ -140,64 +100,31 @@ def emdsac_algorithm(agent, env, args, np, use_encoder, output_path):
                             minibatch_new_states = torch.cat((minibatch_new_states, mb_ns), dim=0)
                             minibatch_masks = torch.cat((minibatch_masks, mb_m), dim=0)
                             minibatch_kappas = torch.cat((minibatch_kappas, mb_p), dim=0)
-                            HER_varpis = torch.cat((HER_varpis, mb_v), dim=0)
-                            #utopia_varpis = torch.cat((utopia_varpis, mb_utop_v), dim=0)
-                            #minibatch_idxs = np.concatenate((minibatch_idxs, mb_idxs), axis=0)
-                    ####
-                    #"""
+                    ##
                     if minibatch_states is not None:
-                        mb_k = minibatch_kappas.cpu().numpy()
-                        ######
-                        counters = update_counters(hilbert_curve, mb_k, bin_size, counters)
-                        pd.DataFrame(counters).to_csv(
-                            output_path + "checkpoint/minibatch_params_count.csv",
-                            mode='w',
-                            header=True
-                        )
-                        ##
                         assert minibatch_states.shape[0] == args.batch_size
-                        HER_varpis = agent.sample_varpis(size=args.batch_size, her=True, kappas=minibatch_kappas)
-                    else:
-                        HER_varpis = None
-                    #"""
                     ## + Set y_i = r_i + \gamma (min(Q_1'(s_{i+1}, \mu(s_{i+1})), Q_2'(s_{i+1}, \mu(s_{i+1}))) - \alpha * \log{\mu(s_{i+1})})
                     ## (y_i is the temporal difference target)
-                    y = agent.get_td_target(
-                        states=minibatch_states,#.repeat(agent.n_proposed_varpis+1, 1),#
-                        actions=minibatch_actions,#.repeat(agent.n_proposed_varpis+1, 1),
-                        rewards=minibatch_rewards,#.repeat(agent.n_proposed_varpis+1, 1),
-                        next_states=minibatch_new_states,#.repeat(agent.n_proposed_varpis+1, 1),
-                        masks=minibatch_masks,#.repeat(agent.n_proposed_varpis+1, 1),
-                        kappas=minibatch_kappas,#.repeat(agent.n_proposed_varpis+1, 1),
-                        her_varpis=HER_varpis#proposed_varpis#
+                    y = agent.get_td_target(states=minibatch_states, actions=minibatch_actions,
+                        rewards=minibatch_rewards, next_states=minibatch_new_states,
+                        masks=minibatch_masks
                     )
                     ## + Update both critics
                     ## (Using the mean squared TD error, \frac{1}{N} \sum\limits_{i=1}^{N} [y_i - Q(s_i, a_i)]^2)
-                    agent.update_critics(td_target=y,
-                        states=minibatch_states,#.repeat(agent.n_proposed_varpis+1, 1),
-                        actions=minibatch_actions,#.repeat(agent.n_proposed_varpis+1, 1),
-                        kappas=minibatch_kappas,#.repeat(agent.n_proposed_varpis+1, 1),
-                        her_varpis=HER_varpis#proposed_varpis#
-                    )
+                    agent.update_critics(td_target=y, states=minibatch_states, actions=minibatch_actions)
                     ## + Update the actor policy using the sampled policy gradient
-                    agent.update_actor(states=minibatch_states, kappas=minibatch_kappas, her_varpis=HER_varpis)
-                    ## + Update the envelope solver
-                    agent.update_solver(states=minibatch_states,
-                        her_varpis=HER_varpis
-                    )
-                    ## + Update the system identifier models (all elements of the ensemble)
-                    agent.update_systemID(states=minibatch_states, actions=minibatch_actions, next_states=minibatch_new_states,
-                        kappas=minibatch_kappas, varpis=HER_varpis
+                    agent.update_actor(states=minibatch_states)
+                    ## + Update dynamics and reward networks
+                    agent.update_world_model(states=minibatch_states, actions=minibatch_actions,
+                        next_states=minibatch_new_states,
+                        kappas=minibatch_kappas, rewards=minibatch_rewards
                     )
                     ## + Update the entropy temperature parameter
-                    agent.update_temperature(states=minibatch_states, kappas=minibatch_kappas, her_varpis=HER_varpis)
+                    agent.update_temperature(states=minibatch_states)
                     ## + Update the target networks
                     agent.update_target_networks(minibatch_states is not None)
-                ###
-                orig_varpi = orig_varpi[~done]
-                ### Update varpi
-                varpi = agent.update_uncertainty(state[~done], action[~done], new_state[~done], varpi[~done])
-                #varpi = varpi[~done]
+                    ## + Increase homotopy parameter lambda:
+                    agent.increase_lambda()
                 ##
                 state = new_state[~done]
                 if (done == True).all() or (t+1) == env._max_episode_steps:
@@ -205,47 +132,25 @@ def emdsac_algorithm(agent, env, args, np, use_encoder, output_path):
                     max_ret = (np.round(np.max(episode_rewards), 3), np.argmax(episode_rewards)+1)
                     mean_ret = np.round(np.mean(episode_rewards), 3)
                     median_ret = np.round(np.median(episode_rewards), 3)
-                    print("[{}] Episode: {}; Steps {}; Episode Acc. Reward: Min = {}, Max = {}, Mean = {}, Median = {}; Loss = {}".format(algo_name_upper, i_episode, agent.steps,
-                        min_ret, max_ret, mean_ret, median_ret,
-                        np.round(episode_loss, 4)
+                    print("[{}] Episode: {}; Steps {}; Episode Acc. Reward: Min = {}, Max = {}, Mean = {}, Median = {}".format(algo_name_upper, i_episode, agent.steps,
+                        min_ret, max_ret, mean_ret, median_ret
                     ))
                     pd.DataFrame(episode_rewards.reshape(1, -1)).to_csv(output_path + "checkpoint/train_returns.csv",
-                                 mode=train_csv_writing_mode, header=(train_csv_writing_mode == 'w' or not os.path.isfile(output_path + "checkpoint/train_returns.csv"))
+                                 mode=train_csv_writing_mode,
+                                 header=(train_csv_writing_mode == 'w' or not os.path.isfile(output_path + "checkpoint/train_returns.csv"))
                     )
                     train_csv_writing_mode = 'a'
-                    ######
-                    pd.DataFrame({"x": I[:, 0], "y": I[:, 1], "T": [t+1]}).to_csv(
-                        output_path + "checkpoint/sampled_params.csv",
-                        mode=sampled_params_writing_mode,
-                        header=(sampled_params_writing_mode == 'w' or not os.path.isfile(output_path + "checkpoint/sampled_params.csv"))
-                    )
-                    sampled_params_writing_mode = 'a'
                     break
-                else:
-                    I = I[~done]
-            ####
-            if agent.steps % args.total_num_steps == 0:
-                agent.save_model(output_path, id=agent.steps//args.total_num_steps)
             ####
             if i_episode % 10 == 0:
-                if args.continuous:
-                    nominal_varpi = np.ones_like(env.latent_ranges[:, 1])
-                    nominal_varpi = np.concatenate((nominal_varpi, np.zeros_like(nominal_varpi)), axis=-1)
-                    fullrange_varpi = np.concatenate(
-                       (0.5 * (env.latent_ranges[:, 1] + env.latent_ranges[:, 0]),
-                        np.sqrt(1./12.) * (env.latent_ranges[:, 1] - env.latent_ranges[:, 0])), axis=-1
-                    )
-                else:
-                    nominal_varpi, _, _ = env.subdomains.get_point_domain_id(point=np.ones_like(env.latent_ranges[:, 1]))#env.nominal_params)
                 ######
                 agent.save_model(output_path + "checkpoint/")
                 ######
-                avg_reward = np.zeros(2)#0.
+                avg_reward = np.zeros(1)
                 for _ in range(args.num_evals):
-                    #episode_reward = evaluate(env.env_set[0], agent, algo_name=algo_name_upper, varpi=nominal_varpi)
                     episode_reward, _ = md_evaluate(
                         envs=eval_envs,
-                        varpis=[nominal_varpi, fullrange_varpi],
+                        varpis=None,
                         agent=agent,
                         algo_name=algo_name_upper,
                         osi_agent=None
@@ -253,6 +158,7 @@ def emdsac_algorithm(agent, env, args, np, use_encoder, output_path):
                     avg_reward += episode_reward
                 avg_reward /= args.num_evals
                 print("--------------------------------")
+                print("+++++++++ Homotopy parameter: ", agent.homotopy_lambda)
                 print("[{}] Evaluation over {} Episodes Avg. Acc. Reward: {}".format(algo_name_upper, args.num_evals, avg_reward))
                 print("--------------------------------")
                 ######
@@ -274,22 +180,21 @@ def emdsac_algorithm(agent, env, args, np, use_encoder, output_path):
         agent.load_weights(output_path)
 
 ###########################################
-def run_emdsac_algorithm(args):
-    #import robel
-    #import gym
+def run_sdrsac_algorithm(args):
+    import robel
+    import gymnasium as gym
     #import pybulletgym
+    from pytorch_rl_collection.envs_utils.normalized_env import NormalizedEnv
+    #from torch.optim import Adam
     from torchoptim.optimizers import TAdam
-    from torch.optim import Adam
     import numpy as np
     from pytorch_rl_collection.replay_buffers.replay_memory import MDReplayMemorySet
-    from pytorch_rl_collection.sac_codes.emdsac.emdsac_agent import EMDSAC_AGENT
+    from pytorch_rl_collection.sac_codes.sdrsac.sdrsac_agent import SDRSAC_AGENT
     from pytorch_rl_collection.envs_utils.env_set import MDEnvSet
     ######
     use_encoder = not args.no_encoding#False
     # - Initialize the environment
-    env = MDEnvSet(env_name=args.env_name, multi_dim=args.multi_dim, n_regions=args.n_regions, seed=args.seed, use_encoder=use_encoder,
-        add_noise=False, use_quasi_random=False
-    )
+    env = MDEnvSet(env_name=args.env_name, multi_dim=args.multi_dim, n_regions=args.n_regions, seed=args.seed, use_encoder=use_encoder, add_noise=False)
     #print(env._max_episode_steps)
     np.random.seed(args.seed)
     env.seed(args.seed)
@@ -299,56 +204,53 @@ def run_emdsac_algorithm(args):
     domains_dim = env.subdomains.domain_dim
     if "DClaw" in args.env_name:
         value_range = env.env_set[0].robot.get_config('dclaw').qpos_range
-        add_observation_noise = False#True#
+        add_observation_noise = False
     else:
         value_range = None
         add_observation_noise = False
+    ######
     # - Automatically set the lambda step length:
-    lambda_steplength = 1. / (args.total_num_steps - args.warmup)
+    lambda_steplength = 1. / (args.total_num_steps - 2*args.warmup)
     assert lambda_steplength > 0.
     # - Initialize the agent
-    model_type = ""
     ### The agent carries all the functions/operations inherent to the algorithm
     ### such as update_actor(), store_transition() or even initialize_replay_buffer().
     ### It is therefore just a function holder.
-    agent = EMDSAC_AGENT(states_dim, actions_dim, domains_dim, args, OptimCls=TAdam,
-                       ReplayBufferCls=MDReplayMemorySet, lambda_steplength=lambda_steplength,
-                       value_range=value_range,
-                       add_noise=add_observation_noise,
-                       model_type=model_type)
+    agent = SDRSAC_AGENT(states_dim, actions_dim, domains_dim, args, OptimCls=TAdam,
+                       ReplayBufferCls=MDReplayMemorySet, value_range=value_range,
+                       add_noise=add_observation_noise, lambda_steplength=lambda_steplength)
 
-    # - Run the eMDSAC algorithm
+    # - Run the sdrsac algorithm
     date = datetime.now()
     date = [str(date.year), str(date.month), str(date.day)]
     date[2] = date[2] if len(date[2]) > 1 else "0"+date[2]
     date[1] = date[1] if len(date[1]) > 1 else "0"+date[1]
     if not args.just_run_test_target:
-        output_path_suffix = "_20240802"#"_" + "".join(date)
+        output_path_suffix = "_" + "".join(date)
     else:
-        output_path_suffix = "_20240710" if args.multi_dim else "_20240802"#
+        if args.multi_dim:
+            output_path_suffix = "_20240625"
     ###
-    algo = args.algo + ("_UT" if args.use_ut else "_MC") + ("_EX" if args.explicit_scal else "_IMP") + ("_resample" if args.resample else "") + ("_cont" if args.continuous else "_disc")
+    algo = args.algo + ("_resample" if args.resample else "")
     env_key_list = list(env.params_idxs.keys())
     output_path = "./trained_agents/{}/{}_{}/{}/".format(
-        algo + "_her" + (("_" + model_type) if model_type != "" else ""),
+        algo,
         args.env_name + ("_ObsNoise" if add_observation_noise else ""),
         ("all" if len(env_key_list) > 2 else "_".join(env_key_list)) + output_path_suffix,
         args.seed
     )
-    ####
-    emdsac_algorithm(agent, env, args, np, use_encoder, output_path)
+    ###
+    sdrsac_algorithm(agent, env, args, np, output_path_suffix, use_encoder, output_path)
+    # - Save the agent actor and critic
     if not args.just_run_test_target:
-        # - Save the agent actor and critic
         make_Dirs(output_path)
         agent.save_model(output_path)
-    #######
     # - Close the environment
     env.close()
     ################
     ################
     from pytorch_rl_collection.test_target_env import run_test_target
-    use_osi = True
     run_test_target(actor=agent.actor, output_path=output_path, env_name=args.env_name, algo_name=args.algo,
-            actor_seed=args.seed, dim=domains_dim, osi_net=agent.systemID,
-            ccs=True, continuous=args.continuous, use_osi=use_osi, save_results=True, use_encoder=use_encoder,
+            actor_seed=args.seed, dim=domains_dim, osi_net=None,
+            ccs=True, continuous=args.continuous, use_osi=False, save_results=True, use_encoder=use_encoder,
             seed=1234, n_runs=50, cuda=args.cuda, cuda_id=args.cuda_id)

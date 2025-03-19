@@ -228,6 +228,20 @@ def make_actor_input(state, varpi, algo_name, continuous=False, device=torch.dev
                 varpi = varpi / varpi.sum()
                 assert np.round(np.sum(varpi.numpy()), 1) == 1., "{}; {}".format(varpi, varpi.sum())
             return (torch.cat((state, varpi), dim=-1).to(device),)
+    elif "sac_rnn" in algo_name:
+        if len(state.shape) == 2:
+            state = state.unsqueeze(1)
+        ######
+        last_action, hidden_state = varpi
+        ######
+        if not isinstance(last_action, torch.Tensor):
+            last_action = torch.FloatTensor(last_action).to(device)
+        if len(last_action.shape) == 1:
+            last_action = last_action.unsqueeze(0).unsqueeze(0)
+        elif len(last_action.shape) == 2:
+            last_action = last_action.unsqueeze(1)
+        ######
+        return (state, last_action, hidden_state, None)
     else:
         return (state.to(device),)
 
@@ -510,10 +524,14 @@ def run_episodes_decay_uncertainty(algo_name, n_runs, n_episodes_per_run, env, a
 
 ################################################################################
 ### Run with environment set
-def run_ccs_episodes(algo_name, n_runs, env, actor, varpi, continuous, data=None, cuda=True, cuda_id=2):
+def run_ccs_episodes(algo_name, n_runs, env, actor, varpi, continuous, data=None, cuda=True, cuda_id=2, rnn_type=""):
     episode_scores = []
     episode_ccs_scores = []
     orig_n_runs = n_runs
+    ####
+    if "sac_rnn" in algo_name:
+        assert rnn_type in ["lstm", "lstm2", "gru"], 'Got an invalid RNN type. \
+            Expected "lstm", "lstm2", "gru"; Got {}'.format(rnn_type)
     ####
     env_name = str(env.env_set[0]).split('<')[-1].split('>')[0]
     if "DClaw" in env_name:
@@ -530,7 +548,21 @@ def run_ccs_episodes(algo_name, n_runs, env, actor, varpi, continuous, data=None
     #####
     for i in range(n_runs):
         state = env.reset()
-        inp_varpi = varpi.repeat(env.n_regions, axis=0)
+        if "sac_rnn" in algo_name:
+            last_action = np.random.uniform(-1.,1., env.action_space.shape[0])
+            last_action = last_action.reshape(1, -1).repeat(env.n_regions, axis=0)
+            last_action = torch.FloatTensor(last_action).unsqueeze(1).to(device)
+            hidden_dim = HIDDEN_DIM_DICT[env_name][0]
+            if "lstm" in rnn_type:
+                hidden_state = (
+                    torch.zeros([1, 1, hidden_dim], dtype=torch.float).repeat(1, env.n_regions, 1).to(device),
+                    torch.zeros([1, 1, hidden_dim], dtype=torch.float).repeat(1, env.n_regions, 1).to(device)
+                )
+            else:
+                hidden_state = torch.zeros([1, 1, hidden_dim], dtype=torch.float).repeat(1, env.n_regions, 1).to(device)
+            inp_varpi = (last_action, hidden_state)
+        else:
+            inp_varpi = varpi.repeat(env.n_regions, axis=0)
         #print(state.shape, inp_varpi.shape)
         episode_score = np.zeros(env.n_regions)
         episode_finalpos = np.zeros(env.n_regions) + np.inf
@@ -543,6 +575,10 @@ def run_ccs_episodes(algo_name, n_runs, env, actor, varpi, continuous, data=None
                 inp = make_actor_input(state, inp_varpi, algo_name, continuous, device)
                 if "ddpg" in algo_name:
                     action = to_numpy(actor(*inp))#.squeeze(axis=0)
+                elif "sac_rnn" in algo_name:
+                    #Output is (action, log_prob, mean, hidden_out)
+                    _, _, action, hidden_state = actor.evaluate(*inp)
+                    action = to_numpy(action.squeeze(1))
                 elif "sac" in algo_name or "sirsa" in algo_name:
                     action = to_numpy(actor(*inp)[-1])#.squeeze(axis=0)#
             ########
@@ -553,7 +589,16 @@ def run_ccs_episodes(algo_name, n_runs, env, actor, varpi, continuous, data=None
                 episode_finalpos[pre_not_dones] = abs(new_state[:, -1])
             ##
             state = new_state[~done]
-            inp_varpi = inp_varpi[~done]
+            if "sac_rnn" in algo_name:
+                last_action = torch.FloatTensor(action[~done]).unsqueeze(1).to(device)
+                if "lstm" in rnn_type:
+                    (h0, c0) = hidden_state
+                    hidden_state = (h0[:, ~done, :], c0[:, ~done, :])
+                else:
+                    hidden_state = hidden_state[:, ~done, :]
+                inp_varpi = (last_action, hidden_state)
+            else:
+                inp_varpi = inp_varpi[~done]
             if (done == True).all() or (t+1) == env._max_episode_steps:
                 #if "DClaw" in env_name: print(episode_finalpos)
                 break
@@ -738,7 +783,7 @@ def reconfigure_osi_varpis(mean, sigma, preds, ub, lb):
 ################################################################################
 def run_test_target(actor, output_path, env_name, algo_name, actor_seed, dim, osi_net=None,
         ccs=True, continuous=True, use_osi=False, save_results=True, use_encoder=False,
-        seed=1234, n_runs=50, cuda=True, cuda_id=0):
+        seed=1234, n_runs=50, cuda=True, cuda_id=0, rnn_type=""):
     if use_osi:
         ccs = False
     if save_results:
@@ -852,7 +897,9 @@ def run_test_target(actor, output_path, env_name, algo_name, actor_seed, dim, os
                 df = None
             ########
             env.seed(seed)
-            df = run_ccs_episodes(algo_name, n_runs, env, actor, varpi, continuous, data=df, cuda=cuda, cuda_id=cuda_id)
+            df = run_ccs_episodes(algo_name, n_runs, env, actor, varpi, continuous,
+                data=df, cuda=cuda, cuda_id=cuda_id, rnn_type=rnn_type
+            )
             ########
             if data is not None:
                 data = pd.concat([data, df], ignore_index=True, sort=True)

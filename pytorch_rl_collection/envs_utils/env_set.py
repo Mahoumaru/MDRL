@@ -556,7 +556,10 @@ class MDEnvSet:
 ###########################################################################################################################
 
 class SIRSAMDEnvSet:
-    def __init__(self, env_name, multi_dim, n_regions=100, seed=None, use_encoder=False, add_noise=False, use_quasi_random=False):
+    def __init__(self, env_name, multi_dim, n_regions=1, n_varpis=100, seed=None, use_encoder=False, add_noise=False, use_quasi_random=False):
+        ######
+        assert n_varpis > 1, "You cannot train SIRSA with only one uncertainty set. \
+            Increase the number of regions/varpis by using the n_regions argument."
         ###### Read config file
         config_filename = env_name.split("-")[0] + ".yaml"
         if "DClaw" in config_filename:
@@ -655,6 +658,7 @@ class SIRSAMDEnvSet:
         #######
         self.rand_seed = seed
         self.n_regions = n_regions
+        self.n_varpis = n_varpis
         self.env_params = None
 
     def initialize_envs(self, env_name):
@@ -867,7 +871,7 @@ class SIRSAMDEnvSet:
         ####
         if self.env_params is None:
             if type == "continuous":
-                varpi_params = self.subdomains._varpi_rnd_generator.uniform(0., 1. + 1e-6, size=(self.n_regions, 2*self.min_rel_param.shape[0]))
+                varpi_params = self.subdomains._varpi_rnd_generator.uniform(0., 1. + 1e-6, size=(self.n_varpis, 2*self.min_rel_param.shape[0]))
                 varpi_means, varpi_sigmas = np.split(varpi_params, 2, axis=-1)
                 ####
                 varpi_means = self.min_rel_param + (self.max_rel_param - self.min_rel_param) * varpi_means
@@ -883,9 +887,9 @@ class SIRSAMDEnvSet:
         ########
         if self.env_params is None:
             _ = self.sample_varpis(type="continuous")
-            assert self.env_params.shape[0] == self.n_regions, "{} vs {}".format(self.env_params.shape, self.n_regions)
+            assert self.env_params.shape[0] == self.n_varpis, "{} vs {}".format(self.env_params.shape, self.n_varpis)
         ###
-        varpi_idx = self.subdomains._points_rnd_gen.randint(self.n_regions)
+        varpi_idx = self.subdomains._points_rnd_gen.randint(self.n_varpis)
         _, varpi = self.env_params[varpi_idx], self.varpis[varpi_idx]
         varpi_means, varpi_sigmas = np.split(varpi, 2, axis=-1)
         kappa = varpi_means + (2. * self.subdomains._points_rnd_gen.uniform(size=varpi_means.shape) - 1.) * np.sqrt(3.) * varpi_sigmas
@@ -1024,7 +1028,7 @@ class SIRSAMDEnvSet:
 
 ################################################################################
 if __name__ == "__main__":
-    env = SIRSAMDEnvSet(env_name="Hopper-v3", n_regions=3, seed=0)
+    env = SIRSAMDEnvSet(env_name="Hopper-v3", n_regions=1, n_varpis=3, seed=0)
     s = env.reset()
     act = env.action_space.sample()
     print("++ Action: ", act)

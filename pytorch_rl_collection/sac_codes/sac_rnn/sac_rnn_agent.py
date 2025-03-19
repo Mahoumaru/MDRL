@@ -1,20 +1,21 @@
 import torch
 from torch.nn import MSELoss
+from torch.nn.utils.rnn import pad_sequence
 import inspect
 import numpy as np
 
-from pytorch_rl_collection.model_networks.model_networks import SacActor as Actor
-from pytorch_rl_collection.model_networks.model_networks import SacCritic as Critic
-from pytorch_rl_collection.replay_buffers.replay_memory import ReplayMemory
+#from pytorch_rl_collection.model_networks.model_networks import SacActor as Actor
+#from pytorch_rl_collection.model_networks.model_networks import SacCritic as Critic
+from pytorch_rl_collection.replay_buffers.replay_memory import ReplayMemoryLSTM2
 from pytorch_rl_collection.utils import *#hard_update, soft_update
 
 ###########################################
 criterion = MSELoss()
 
 ###########################################
-class SAC_AGENT:
+class SAC_RNN_AGENT:
     def __init__(self, states_dim, actions_dim, args, OptimCls=torch.optim.Adam,
-                 ReplayBufferCls=ReplayMemory, value_range=None, add_noise=False, OptimArgs={}):
+                 ReplayBufferCls=ReplayMemoryLSTM2, value_range=None, add_noise=False, OptimArgs={}):
         self.steps = 0
         self.warmup = args.warmup
         self.states_dim = states_dim
@@ -36,16 +37,31 @@ class SAC_AGENT:
         self.alpha = args.alpha
         self.automatic_entropy_tuning = args.automatic_entropy_tuning
 
+        ##
+        self.model_type = args.rnn_type
+        if self.model_type == "lstm":
+            from pytorch_rl_collection.model_networks.model_networks import SacActorLSTM as Actor
+            from pytorch_rl_collection.model_networks.model_networks import SacCriticLSTM as Critic
+        elif self.model_type == "lstm2":
+            from pytorch_rl_collection.model_networks.model_networks import SacActorLSTM as Actor
+            from pytorch_rl_collection.model_networks.model_networks import SacCriticLSTM2 as Critic
+        elif self.model_type == "gru":
+            from pytorch_rl_collection.model_networks.model_networks import SacActorGRU as Actor
+            from pytorch_rl_collection.model_networks.model_networks import SacCriticGRU as Critic
+        else:
+            print("++ {} is not a valid RNN SAC type".format(self.model_type))
+            raise NotImplementedError
+        #####
+        self.CriticCls = Critic
+        self.ActorCls = Actor
+
         # Hyper-parameters
         #self.batch_size = args.batch_size
         self.tau = args.tau
         self.discount = args.discount
 
         #
-        self.vargrad = args.vargrad
         dof = np.inf
-        """if self.vargrad:
-            dof = 1."""
         self.target_updater1 = TSoft_Update(self.tau, dof=dof, eps=1e-8, name="Target_Updater1")
         self.target_updater2 = TSoft_Update(self.tau, dof=dof, eps=1e-8, name="Target_Updater2")
         ### self.use_cuda = args.cuda
@@ -65,8 +81,17 @@ class SAC_AGENT:
 
     def add_noise(self, states):
         if self.noise_amplitude is not None:
-            states[:, :9] = states[:, :9] + self.noise_amplitude * torch.FloatTensor(states.shape[0], 9).to(self.device).uniform_(-0.5, 0.5, generator=self._points_random_generator)
+            states[:, :, :9] = states[:, :, :9] + self.noise_amplitude * torch.FloatTensor(states.shape[0], 9).to(self.device).uniform_(-0.5, 0.5, generator=self._points_random_generator)
         return states
+
+    def reset_hidden_state(self):
+        hidden_dim = self.net_cfg['hidden_layers'][0]
+        self.last_action = torch.FloatTensor(np.random.uniform(-1., 1., self.actions_dim)).to(self.device).unsqueeze(0).unsqueeze(0)
+        if self.model_type == "gru":
+            self.hidden_state = torch.zeros([1, 1, hidden_dim], dtype=torch.float).to(self.device)
+        else:
+            self.hidden_state = (torch.zeros([1, 1, hidden_dim], dtype=torch.float).to(self.device), \
+                    torch.zeros([1, 1, hidden_dim], dtype=torch.float).to(self.device))
 
     def initialize(self):
         # An utility function to be able to initialize
@@ -78,8 +103,8 @@ class SAC_AGENT:
         self.initialize_entropy_temperature()
 
     def initialize_critics(self):
-        self.critic1 = Critic(self.states_dim, self.actions_dim, **self.net_cfg).to(self.device)
-        self.critic2 = Critic(self.states_dim, self.actions_dim, **self.net_cfg).to(self.device)
+        self.critic1 = self.CriticCls(self.states_dim, self.actions_dim, **self.net_cfg).to(self.device)
+        self.critic2 = self.CriticCls(self.states_dim, self.actions_dim, **self.net_cfg).to(self.device)
         if self.verbose:
             print("++ Both Critics Initialized with following structure:")
             print(self.critic1)
@@ -90,8 +115,7 @@ class SAC_AGENT:
     def initialize_actor(self):
         net_cfg = self.net_cfg.copy()
         net_cfg['policy_type'] = "Gaussian"
-        net_cfg['VarGrad'] = self.vargrad
-        self.actor = Actor(self.states_dim, self.actions_dim, **net_cfg).to(self.device)
+        self.actor = self.ActorCls(self.states_dim, self.actions_dim, **net_cfg).to(self.device)
         if self.verbose:
             print("++ Actor Initialized with following structure:")
             print(self.actor)
@@ -107,8 +131,8 @@ class SAC_AGENT:
             self.alpha = self.log_alpha.exp().item()
 
     def initialize_targets(self):
-        self.critic1_target = Critic(self.states_dim, self.actions_dim, **self.net_cfg).to(self.device)
-        self.critic2_target = Critic(self.states_dim, self.actions_dim, **self.net_cfg).to(self.device)
+        self.critic1_target = self.CriticCls(self.states_dim, self.actions_dim, **self.net_cfg).to(self.device)
+        self.critic2_target = self.CriticCls(self.states_dim, self.actions_dim, **self.net_cfg).to(self.device)
         if self.verbose:
             print("++ Both Target Critic networks Initialized.")
         hard_update(self.critic1_target, self.critic1) # Make sure target is with the same weight
@@ -122,49 +146,100 @@ class SAC_AGENT:
     def select_action(self, state, is_training=True):
         if self.steps <= self.warmup:
             action = np.random.uniform(-1.,1.,self.actions_dim)
+            #####
+            self.last_action = torch.FloatTensor(action).to(self.device).unsqueeze(0).unsqueeze(0)
+            #####
         else:
-            state = torch.FloatTensor(state).to(self.device).unsqueeze(0)
+            state = torch.FloatTensor(state).to(self.device).unsqueeze(0).unsqueeze(0)
             state = self.add_noise(state)
             if is_training:
-                action, _, _ = self.actor(state)
+                action, _, hidden_out = self.actor.get_action(state, self.last_action, self.hidden_state, lengths=None)
             else:
-                _, _, action = self.actor.get_deterministic_action(state)
+                _, action, hidden_out = self.actor.get_action(state, self.last_action, self.hidden_state, lengths=None)
+            #####
+            self.last_action = torch.clone(action.detach())
+            if self.model_type == "gru":
+                self.hidden_state = hidden_out.detach()
+            else:
+                self.hidden_state = (hidden_out[0].detach(), hidden_out[1].detach())
+            #####
             action = to_numpy(
                 action
-            ).squeeze(axis=0)
+            ).squeeze()#.squeeze(axis=0).squeeze(axis=0)
             #action = np.clip(action, -1., 1.)
 
         self.steps += int(is_training)#1
         return action
 
     def store_transition(self, transition):
-        state, action, reward, next_state, done, _ = transition
-        self.replay_memory.push(state, action, reward, next_state, done)
+        state, action, last_action, reward, next_state, done = transition
+        self.replay_memory.push(state, action, last_action, reward, next_state, done)
+
+    def store_whole_episode(self, episode):
+        ini_hidden_in, ini_hidden_out, episode_state, episode_action, episode_last_action, \
+                episode_reward, episode_next_state, episode_done = episode
+        self.replay_memory.push(ini_hidden_in, ini_hidden_out, episode_state, episode_action, episode_last_action, \
+                episode_reward, episode_next_state, episode_done)
 
     def sample_minibatch(self, batch_size):
         #if self.steps > self.warmup:
         if len(self.replay_memory) > batch_size:
             #print(self.steps)
-            state_batch, action_batch, reward_batch, \
-            next_state_batch, terminal_batch, _ = self.replay_memory.sample(batch_size)
-            state_batch = torch.FloatTensor(state_batch).to(self.device)
-            next_state_batch = torch.FloatTensor(next_state_batch).to(self.device)
-            action_batch = torch.FloatTensor(action_batch).to(self.device)
-            reward_batch = torch.FloatTensor(reward_batch).to(self.device).unsqueeze(1)
-            terminal_batch = torch.FloatTensor(terminal_batch).to(self.device).unsqueeze(1)
-            return state_batch, action_batch, reward_batch, next_state_batch, terminal_batch, {}
+            """if self.model_type == "lstm":
+                state_batch, action_batch, last_action_batch, reward_batch, \
+                next_state_batch, terminal_batch = self.replay_memory.sample(batch_size)
+                hidden_in, hidden_out = None, None
+                ######
+                state_batch = torch.FloatTensor(state_batch).to(self.device).unsqueeze(1)
+                next_state_batch = torch.FloatTensor(next_state_batch).to(self.device).unsqueeze(1)
+                action_batch = torch.FloatTensor(action_batch).to(self.device).unsqueeze(1)
+                last_action_batch = torch.FloatTensor(last_action_batch).to(self.device).unsqueeze(1)
+                reward_batch = torch.FloatTensor(reward_batch).to(self.device).unsqueeze(-1).unsqueeze(1)
+                terminal_batch = torch.FloatTensor(terminal_batch).to(self.device).unsqueeze(-1).unsqueeze(1)
+                ######
+                lengths = None
+            else:"""
+            hidden_in, hidden_out, state_batch, action_batch, last_action_batch, reward_batch, \
+            next_state_batch, terminal_batch, lengths = self.replay_memory.sample(batch_size)
+            ######
+            #lengths = []
+            #for ep in range(batch_size):
+            #    lengths.append(state_batch[ep].shape[0])
+            ######
+            state_batch = pad_sequence(state_batch, batch_first=True).to(self.device)
+            next_state_batch = pad_sequence(next_state_batch, batch_first=True).to(self.device)
+            action_batch = pad_sequence(action_batch, batch_first=True).to(self.device)
+            last_action_batch = pad_sequence(last_action_batch, batch_first=True).to(self.device)
+            reward_batch = pad_sequence(reward_batch, batch_first=True).to(self.device).unsqueeze(-1)
+            terminal_batch = pad_sequence(terminal_batch, batch_first=True).to(self.device).unsqueeze(-1)
+            ######
+            #state_batch = torch.FloatTensor(state_batch).to(self.device)
+            #next_state_batch = torch.FloatTensor(next_state_batch).to(self.device)
+            #action_batch = torch.FloatTensor(action_batch).to(self.device)
+            #last_action_batch = torch.FloatTensor(last_action_batch).to(self.device)
+            #reward_batch = torch.FloatTensor(reward_batch).to(self.device).unsqueeze(-1)
+            #terminal_batch = torch.FloatTensor(terminal_batch).to(self.device).unsqueeze(-1)
+            ######
+            #print(lengths)
+            #print(hidden_in.shape, hidden_out.shape)
+            #print(hidden_in[0].shape, hidden_in[1].shape)
+            #print(hidden_out[0].shape, hidden_out[1].shape)
+            #print(state_batch.shape, action_batch.shape, last_action_batch.shape, reward_batch.shape)
+            #print(jkklk)
+            ######
+            return hidden_in, hidden_out, state_batch, action_batch, last_action_batch, reward_batch, next_state_batch, terminal_batch, lengths
         else:
-            return None, None, None, None, None, None
+            return None, None, None, None, None, None, None, None, None
 
-    def get_td_target(self, states, rewards, next_states, masks):
+    def get_td_target(self, states, actions, rewards, next_states, masks, hidden_out, lengths):
         if states is not None:
             # Prepare the target q batch
             with torch.no_grad():
-                next_states_action, next_states_log_pi, _ = self.actor(next_states)
+                next_states_actions, next_states_log_pi, _, _ = self.actor.evaluate(next_states, actions, hidden_out, lengths)
                 ## Q1
-                next_q1_values = self.critic1_target([ next_states, next_states_action ])
+                next_q1_values, _ = self.critic1_target(next_states, next_states_actions, actions, hidden_out, lengths)
                 ## Q2
-                next_q2_values = self.critic2_target([ next_states, next_states_action ])
+                next_q2_values, _ = self.critic2_target(next_states, next_states_actions, actions, hidden_out, lengths)
                 ## min(Q1, Q2)
                 min_next_qf_target = torch.min(next_q1_values, next_q2_values) - self.alpha * next_states_log_pi
 
@@ -174,34 +249,37 @@ class SAC_AGENT:
         else:
             return None
 
-    def update_critics(self, td_target, states, actions):
+    def update_critics(self, td_target, states, actions, last_actions, hidden_in, lengths):
         if td_target is not None:
             self.critic1_optim.zero_grad()
             self.critic2_optim.zero_grad()
-            q1_batch = self.critic1([ states, actions ])
-            q2_batch = self.critic2([ states, actions ])
+            q1_batch, _ = self.critic1(states, actions, last_actions, hidden_in, lengths)
+            q2_batch, _ = self.critic2(states, actions, last_actions, hidden_in, lengths)
             value_loss = criterion(q1_batch, td_target) + criterion(q2_batch, td_target)
             value_loss.backward()
             self.critic1_optim.step()
             self.critic2_optim.step()
 
-    def update_actor(self, states):
+    def update_actor(self, states, last_actions, hidden_in, lengths):
         if states is not None:
             self.actor_optim.zero_grad()
 
-            actions, log_pi, _ = self.actor(self.add_noise(states))
-            policy_loss = (self.alpha * log_pi) - torch.min(self.critic1([ states, actions ]), self.critic2([ states, actions ]))
+            actions, log_pi, _, _ = self.actor.evaluate(self.add_noise(states), last_actions, hidden_in, lengths)
+            policy_loss = (self.alpha * log_pi) - torch.min(
+                self.critic1(states, actions, last_actions, hidden_in, lengths)[0],
+                self.critic2(states, actions, last_actions, hidden_in, lengths)[0]
+            )
 
             policy_loss = policy_loss.mean()
             policy_loss.backward()
             self.actor_optim.step()
 
-    def update_temperature(self, states):
+    def update_temperature(self, states, last_actions, hidden_in, lengths):
         if states is not None and self.automatic_entropy_tuning:
             self.alpha_optim.zero_grad()
 
             with torch.no_grad():
-                _, log_pi, _ = self.actor(states)
+                _, log_pi, _, _ = self.actor.evaluate(states, last_actions, hidden_in, lengths)
             alpha_loss = - (self.log_alpha * (log_pi + self.target_entropy)).mean()
             alpha_loss.backward()
             self.alpha_optim.step()

@@ -4,7 +4,7 @@ import inspect
 import numpy as np
 from torch.distributions import Normal
 
-from pytorch_rl_collection.utils import hard_update, soft_update, fetch_uniform_unscented_transfo, to_numpy
+from pytorch_rl_collection.utils import hard_update, soft_update, fetch_uniform_unscented_transfo, to_numpy, estimate_cvar
 from pytorch_rl_collection.replay_buffers.replay_memory import ReplayMemory
 from pytorch_rl_collection.model_networks.model_networks import SacActor as Actor
 from pytorch_rl_collection.model_networks.model_networks import SacCritic as Critic
@@ -59,7 +59,11 @@ class MDSAC_BASE_AGENT:
             self._varpi_random_generator = self._varpi_random_generator.manual_seed(1234 * self.seed)
             self._points_random_generator = self._points_random_generator.manual_seed(1234 * self.seed)
         #####
-        self.use_ut = args.use_ut
+        self.use_cvar = args.use_cvar
+        self.cvar_alpha = args.cvar_alpha
+        self.cvar_samples = args.cvar_samples
+        #####
+        self.use_ut = False if self.use_cvar else args.use_ut
         #####
         self.varpi_size = 2 * domains_dim
         if self.use_ut:
@@ -132,7 +136,10 @@ class MDSAC_BASE_AGENT:
         raise NotImplementedError
 
     def initialize_replay_buffer_set(self, size):
-        self.replay_memory = self.ReplayBufferCls(size=size, capacity=self.rmsize, seed=self.seed, window_length=self.window_length)
+        self.replay_memory = self.ReplayBufferCls(size=size, capacity=self.rmsize,
+            seed=self.seed, window_length=self.window_length, dim=None,
+            diversified=False
+        )
         if self.verbose:
             print("++ Replay Memory Set Initialized with size {}.".format(size))
 
@@ -526,12 +533,12 @@ class SDRSAC_AGENT(DRSAC_AGENT):
             actions, log_pi, _ = self.actor(self.add_noise(states))
             ######
             bs = states.shape[0]
-            if self.use_ut: # Use UT
+            if self.use_ut and not self.use_cvar: # Use UT
                 k = self.sigma_points[self.sp_counter].shape[0]
                 kappas = self.domain_mean + (2. * self.sigma_points[self.sp_counter].unsqueeze(1).repeat(1, bs, 1) - 1.) * np.sqrt(3.) * self.domain_sigma
                 self.sp_counter = (self.sp_counter + 1) % self.sp_max_num
             else:
-                k = 50
+                k = self.cvar_samples if self.use_cvar else 50
                 kappas = torch.FloatTensor(k, self.domain_mean.shape[-1]).to(self.device).uniform_(0., 1. + 1e-6, generator=self._points_random_generator)
                 kappas = self.domain_mean + (2. * kappas.unsqueeze(1).repeat(1, bs, 1) - 1.) * np.sqrt(3.) * self.domain_sigma
             ######
@@ -540,7 +547,13 @@ class SDRSAC_AGENT(DRSAC_AGENT):
             )
             actions = actions.unsqueeze(0).repeat(k, 1, 1)
             ######
-            policy_loss = (self.alpha * log_pi) - torch.min(self.critic1([ aug_states, actions ]), self.critic2([ aug_states, actions ])).mean(0)
+            if self.use_cvar:
+                policy_loss = (self.alpha * log_pi) - estimate_cvar(
+                    torch.min(self.critic1([ aug_states, actions ]), self.critic2([ aug_states, actions ])),
+                    alpha=self.cvar_alpha
+                )
+            else:
+                policy_loss = (self.alpha * log_pi) - torch.min(self.critic1([ aug_states, actions ]), self.critic2([ aug_states, actions ])).mean(0)
             policy_loss = policy_loss.mean()
             ############################################
             policy_loss.backward()
@@ -739,12 +752,12 @@ class CMDSAC_AGENT(MDSAC_BASE_AGENT):
             ####
             mean, sigma = torch.split(varpis, self.varpi_size//2, dim=-1)
             ####
-            if self.use_ut: # Use UT
+            if self.use_ut and not self.use_cvar: # Use UT
                 k = self.sigma_points[self.sp_counter].shape[0]
                 varpis_kappas = mean + (2. * self.sigma_points[self.sp_counter].unsqueeze(1).repeat(1, bs, 1) - 1.) * np.sqrt(3.) * sigma
                 self.sp_counter = (self.sp_counter + 1) % self.sp_max_num
             else:
-                k = 50
+                k = self.cvar_samples if self.use_cvar else 50
                 varpis_kappas = torch.FloatTensor(k, mean.shape[-1]).to(self.device).uniform_(0., 1. + 1e-6, generator=self._points_random_generator)
                 varpis_kappas = mean + (2. * varpis_kappas.unsqueeze(1).repeat(1, bs, 1) - 1.) * np.sqrt(3.) * sigma
             ############################################
@@ -759,12 +772,21 @@ class CMDSAC_AGENT(MDSAC_BASE_AGENT):
             ######
             aug_states = torch.cat((states.unsqueeze(0).repeat(k, 1, 1), varpis_kappas, varpis.unsqueeze(0).repeat(k, 1, 1)), dim=-1)
             ######
-            policy_loss = (
-                (self.alpha * log_pi) - torch.min(
-                    self.critic1([ aug_states, actions ]),
-                    self.critic2([ aug_states, actions ])
-                ).mean(0)
-            )
+            if self.use_cvar:
+                policy_loss = (self.alpha * log_pi) - estimate_cvar(
+                    torch.min(
+                        self.critic1([ aug_states, actions ]),
+                        self.critic2([ aug_states, actions ])
+                    ),
+                    alpha=self.cvar_alpha
+                )
+            else:
+                policy_loss = (
+                    (self.alpha * log_pi) - torch.min(
+                        self.critic1([ aug_states, actions ]),
+                        self.critic2([ aug_states, actions ])
+                    ).mean(0)
+                )
             ######
             policy_loss = policy_loss.mean()
             ############################################
@@ -898,12 +920,12 @@ class EMDSAC_AGENT(CMDSAC_AGENT):
             ####
             mean, sigma = torch.split(varpis, self.varpi_size//2, dim=-1)
             ####
-            if self.use_ut: # Use UT
+            if self.use_ut and not self.use_cvar: # Use UT
                 k = self.sigma_points[self.sp_counter].shape[0]
                 varpis_kappas = mean + (2. * self.sigma_points[self.sp_counter].unsqueeze(1).repeat(1, bs, 1) - 1.) * np.sqrt(3.) * sigma
                 self.sp_counter = (self.sp_counter + 1) % self.sp_max_num
             else:
-                k = 50
+                k = self.cvar_samples if self.use_cvar else 50
                 varpis_kappas = torch.FloatTensor(k, mean.shape[-1]).to(self.device).uniform_(0., 1. + 1e-6, generator=self._points_random_generator)
                 varpis_kappas = mean + (2. * varpis_kappas.unsqueeze(1).repeat(1, bs, 1) - 1.) * np.sqrt(3.) * sigma
             ############################################
@@ -914,7 +936,7 @@ class EMDSAC_AGENT(CMDSAC_AGENT):
             ####
             actions, log_pi, _ = self.actor(torch.cat((states, ccs_varpis), dim=-1))
             ######
-            aug_actions = actions.unsqueeze(0).repeat(k, 1, 1)
+            actions = actions.unsqueeze(0).repeat(k, 1, 1)
             #####
             aug_states = torch.cat(
                 (
@@ -924,10 +946,19 @@ class EMDSAC_AGENT(CMDSAC_AGENT):
                 ), dim=-1
             )
             ####
-            solver_loss = (self.alpha * log_pi) - torch.min(
-                self.critic1([ aug_states, aug_actions ]),
-                self.critic2([ aug_states, aug_actions ])
-            ).mean(0)
+            if self.use_cvar:
+                solver_loss = (self.alpha * log_pi) - estimate_cvar(
+                    torch.min(
+                        self.critic1([ aug_states, actions ]),
+                        self.critic2([ aug_states, actions ])
+                    ),
+                    alpha=self.cvar_alpha
+                )
+            else:
+                solver_loss = (self.alpha * log_pi) - torch.min(
+                    self.critic1([ aug_states, actions ]),
+                    self.critic2([ aug_states, actions ])
+                ).mean(0)
             ####
             solver_loss = solver_loss.mean()
             ############################################
@@ -1052,12 +1083,12 @@ class UMDSAC_AGENT(CMDSAC_AGENT):
             ####
             mean, sigma = torch.split(varpis, self.varpi_size//2, dim=-1)
             ####
-            if self.use_ut: # Use UT
+            if self.use_ut and not self.use_cvar: # Use UT
                 k = self.sigma_points[self.sp_counter].shape[0]
                 varpis_kappas = mean + (2. * self.sigma_points[self.sp_counter].unsqueeze(1).repeat(1, bs, 1) - 1.) * np.sqrt(3.) * sigma
                 self.sp_counter = (self.sp_counter + 1) % self.sp_max_num
             else:
-                k = 50
+                k = self.cvar_samples if self.use_cvar else 50
                 varpis_kappas = torch.FloatTensor(k, mean.shape[-1]).to(self.device).uniform_(0., 1. + 1e-6, generator=self._points_random_generator)
                 varpis_kappas = mean + (2. * varpis_kappas.unsqueeze(1).repeat(1, bs, 1) - 1.) * np.sqrt(3.) * sigma
             ############################################
@@ -1072,12 +1103,22 @@ class UMDSAC_AGENT(CMDSAC_AGENT):
             ######
             aug_states = torch.cat((states.unsqueeze(0).repeat(k, 1, 1), varpis_kappas), dim=-1)
             ######
-            policy_loss = (
-                (self.alpha * log_pi) - torch.min(
-                    self.critic1([ aug_states, actions ]),
-                    self.critic2([ aug_states, actions ])
-                ).mean(0)
-            )
+            if self.use_cvar:
+                policy_loss = (self.alpha * log_pi) - estimate_cvar(
+                    torch.min(
+                        self.critic1([ aug_states, actions ]),
+                        self.critic2([ aug_states, actions ])
+                    ),
+                    alpha=self.cvar_alpha
+                )
+            else:
+                policy_loss = (
+                    (self.alpha * log_pi) - torch.min(
+                        self.critic1([ aug_states, actions ]),
+                        self.critic2([ aug_states, actions ])
+                    ).mean(0)
+                )
+            ######
             policy_loss = policy_loss.mean()
             ############################################
             policy_loss.backward()

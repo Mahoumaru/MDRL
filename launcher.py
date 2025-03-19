@@ -26,6 +26,16 @@ parser.add_argument('--just_run_test_target', action='store_true', help='Only ev
 parser.add_argument('--multi_dim', action='store_true', help="Use high dimension (i.e. > 2) parameter space. (default: False)")
 parser.add_argument('--use_solver', action='store_true', help='Set uMDSAC agent to use a solver (i.e. selects uMDSAC-v2 instead of uMDSAC-v1) (default: False)')
 parser.add_argument('--use_her', action='store_true', help='Set algorithm to use Hindsight Experience Replay (default: False)')
+parser.add_argument('--vargrad', action='store_true', help='Use VarGrad for variance reduction of the policy variational inference (default: False)')
+# Used for RNN-based algorithms
+parser.add_argument('--rnn_type', default='lstm2', type=str, help='RNN type in [lsts, lstm2, gru] (default: lstm2)')
+parser.add_argument('--truncated_mem', action='store_true', help='Whether or not to use the truncated replay memory (default: False)')
+parser.add_argument('--max_sequence_length', default=20, type=int, help='The length of a sub-sequence in the truncated replay memory (default: 20)')
+parser.add_argument('--adjustment_percentage', default=0.5, type=float, help='Adjustment percentage between 0 and 1, with 1 being full adjustment and 0 being no adjustment at all (default: 0.5)')
+#### Used For CVaR computation
+parser.add_argument('--use_cvar', action='store_true', help='Run with CVaR loss function. (default: False)')
+parser.add_argument('--cvar_alpha', default=0.5, type=float, help='CVaR fractions (or quantile) parameter (default: 0.5)')
+parser.add_argument('--cvar_samples', default=50, type=int, help='Number of samples for CVaR estimation. (default: 50)')
 ##
 args = parser.parse_args()
 
@@ -80,12 +90,24 @@ def get_sac_cmd(algo, seed):
     else:
         raise NotImplementedError
     ################
+    if "rnn" in algo:
+        warmup = 0
+        batch_size = 16
+    ################
     if "sac" == algo or "sac_no_target" == algo:
         cmd = "python main.py --algo {} --env_name {} --seed {} --batch_size {} \
                    --hidden_layers {} {} --warmup {} --total_num_steps {} --tau {} \
                    --number_of_updates {} --alpha {} --automatic_entropy_tuning \
                    --cuda_id {} --num_evals {} --cuda --verbose".format(algo, args.env_name, seed + args.first_run_idx,#--save_best
                    batch_size, *hidden_layers, warmup, n_steps, tau, 1, 0.2, args.cuda_id, num_evals)
+        if args.vargrad:
+            cmd += " --vargrad"
+    elif "sac_rnn" == algo:
+        cmd = "python main.py --algo {} --env_name {} --seed {} --batch_size {} \
+                   --hidden_layers {} {} --warmup {} --total_num_steps {} --tau {} \
+                   --number_of_updates {} --alpha {} --automatic_entropy_tuning \
+                   --cuda_id {} --num_evals {} --rnn_type {} --cuda --verbose".format(algo, args.env_name, seed + args.first_run_idx,#--save_best
+                   batch_size, *hidden_layers, warmup, n_steps, tau, 1, 0.2, args.cuda_id, num_evals, args.rnn_type)
     elif "arsac" in algo:
         cmd = "python main.py --algo {} --env_name {} --seed {} --batch_size {} \
                    --hidden_layers {} {} --warmup {} --total_num_steps {} --tau {} \
@@ -101,6 +123,11 @@ def get_sac_cmd(algo, seed):
                    --cuda_id {} --cuda --verbose".format(algo, args.env_name, seed + args.first_run_idx,# --save_best
                    batch_size, *hidden_layers, warmup, n_steps, tau, 1, 0.2, args.n_regions, args.cuda_id)
         cmd += " --rel_mass_range {},{}".format(*args.rel_mass_range)
+        #### CVaR
+        if args.use_cvar:
+            cmd += " --use_cvar"
+        cmd += " --cvar_alpha {} --cvar_samples {}".format(args.cvar_alpha, args.cvar_samples)
+        ####
         if args.resample:
             cmd += " --resample"
         if args.continuous:
@@ -119,6 +146,12 @@ def get_sac_cmd(algo, seed):
             cmd += " --use_her"
         if args.use_solver:
             cmd += " --use_solver"
+        if "rnn" in algo:
+            cmd += " --rnn_type {}".format(args.rnn_type)
+            if args.truncated_mem:
+                cmd += " --truncated_mem --max_sequence_length {} --adjustment_percentage {}".format(
+                    args.max_sequence_length, args.adjustment_percentage
+                )
     else:
         raise NotImplementedError
     #####

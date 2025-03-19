@@ -19,6 +19,8 @@ import fnmatch
 import yaml
 import os
 
+import pickle
+
 import operator
 from pytorch_rl_collection.utils import make_Dirs, interquartile_mean
 from scipy.stats import iqr
@@ -43,6 +45,8 @@ def fetch_args():
     parser.add_argument('--continuous', action='store_true', help='Continuous varpi. (default: False)')
     parser.add_argument('--multi_dim', action='store_true', help='Multi-dimensional parameter space. (default: False)')
     parser.add_argument('--her', action='store_true', help='Hindsight Experience Replay results. (default: False)')
+    parser.add_argument('--use_cvar', action='store_true', help='Run with CVaR loss function. (default: False)')
+    parser.add_argument('--cvar_alpha', default=0.5, type=float, help='CVaR fractions (or quantile) parameter (default: 0.5)')
     return parser.parse_args()
 
 ################################################################################
@@ -158,6 +162,7 @@ def get_latex_table_lines_ccs(env_name, selected_data, Agent_Seeds, My_Algo_Name
     latex_table_lines = {"Head": "Parameters & Algos & $V_{i}$ & $S$"}
     ##############
     values_dict = {key: ([], []) for key in My_Algo_Names}
+    varpi_values_dict = {}
     ##############
     for i, param in enumerate(Env_Params):
         if len(list(selected_data.loc[selected_data.Env_Params.isin([param])][keys[1]])) == 0:#len(best_vals) == 0:
@@ -196,6 +201,10 @@ def get_latex_table_lines_ccs(env_name, selected_data, Agent_Seeds, My_Algo_Name
             total_ret_stds_per_seed = []
             total_ret_ccs_means_per_seed = []
             total_ret_ccs_stds_per_seed = []
+            ######
+            modified_algo_name = algo.replace("uMDSAC (Ours)", "uMDSAC-v2 (Ours)")
+            varpi_values_dict[modified_algo_name] = {}
+            ######
             for j, selected_agent_seed in enumerate(Agent_Seeds):
                 df = selected_data.loc[selected_data.Algo.isin([algo]) & selected_data.Env_Params.isin([param]) & selected_data.Actor_Seed.isin([selected_agent_seed])]
                 ##### MEAN
@@ -209,6 +218,8 @@ def get_latex_table_lines_ccs(env_name, selected_data, Agent_Seeds, My_Algo_Name
                 except IndexError:
                     continue
                 ####
+                varpi_values_dict[modified_algo_name][selected_agent_seed] = {"CCS": ret_ccs_means, "Per_Env_Scores": ret_means.T}
+                #####
                 #print(algo, selected_agent_seed, type(ret_means), type(ret_ccs_means))#, len(ret_means), len(ret_ccs_means))
                 #print(ret_means.shape)
                 #print(ret_ccs_means.shape)
@@ -286,7 +297,7 @@ def get_latex_table_lines_ccs(env_name, selected_data, Agent_Seeds, My_Algo_Name
     #print(latex_table_lines)
     #print(jklkl)
     #####
-    return latex_table_lines, values_dict
+    return latex_table_lines, values_dict, varpi_values_dict
 
 ################################################################################
 def get_latex_table_lines(selected_data, Agent_Seeds, Varpis, My_Algo_Names, Env_Params, n_regions, VARPI_REPR):
@@ -428,8 +439,18 @@ def get_latex_table_lines_uevol(env_name, selected_data, colors, Agent_Seeds, My
     return latex_table_lines
 
 ################################################################################
-def get_date_suffix(algo_name, env_name, multi_dim, her_flag):
-    if her_flag: ## HER
+def get_date_suffix(algo_name, env_name, multi_dim, her_flag, cvar_flag=False):
+    if cvar_flag:
+        if "DClawTurnFixed" in env_name:
+            SUFFIX = {
+                "sdrsac": "_20250223",
+                "sirsa": "_20240802",
+                "umdsac": "_20250224",
+                "umdsac-v1": "_20250224",
+            }
+        else:
+            raise NotImplementedError
+    elif her_flag: ## HER
         if "Hopper" in env_name:
             SUFFIX = {
                 "drsac": "_20240620" if multi_dim else "_20240517",
@@ -525,11 +546,11 @@ def get_data(files, ccs, n_regions, env_name):
     for filename in files:
         if data is None:
             data = pd.read_csv(filename)
-            if "_no_solver" in filename:
+            if "_v1" in filename:
                 data["Algo"] = data["Algo"].str.replace('umdsac', 'umdsac-v1')
         else:
             df = pd.read_csv(filename)
-            if "_no_solver" in filename:
+            if "_v1" in filename:
                 df["Algo"] = df["Algo"].str.replace('umdsac', 'umdsac-v1')
             data = pd.concat([data, df], ignore_index=True, sort=True)
 
@@ -543,8 +564,8 @@ def get_data(files, ccs, n_regions, env_name):
         m = m.upper()
         if "MD" in m or "SDR" in m:
             m = m.replace("ESMDSAC", "esMDSAC")
-            m = m.replace("SDRSAC", "sDRSAC") + " (Ours)"
-            m = m.replace("SMDSAC", "uMDSAC")
+            m = m.replace("SDRSAC", "sDRSAC")
+            m = m.replace("SMDSAC", "uMDSAC").replace("UMDSAC", "uMDSAC") + " (Ours)"
             m = m.replace("CMDSAC", "cMDSAC")
             m = m.replace("CMD", "cMD")
             m = m.replace("EMD", "eMD")
@@ -584,7 +605,7 @@ def get_data(files, ccs, n_regions, env_name):
     return data, meths, agent_seeds
 
 ################################################################################
-def latexify_eval_results(env_name, data, meths, ccs, her_flag, osi_flag, Agent_Seeds, Varpis, My_Algo_Names, Env_Params, continuous, n_regions, Regions, summ_ret=True, keep_best_model=False):
+def latexify_eval_results(env_name, data, meths, ccs, her_flag, osi_flag, cvar_flag, cvar_alpha, Agent_Seeds, Varpis, My_Algo_Names, Env_Params, continuous, n_regions, Regions, summ_ret=True, keep_best_model=False):
     #"""
     latex_file = "\\documentclass{article}\n\\usepackage[landscape,hmargin=0.1cm]{geometry}\n"
     if not ccs:
@@ -598,12 +619,17 @@ def latexify_eval_results(env_name, data, meths, ccs, her_flag, osi_flag, Agent_
     latex_file += "\\begin{document}\n\\begin{center}\n"
 
     print("#############################")
+    ##########
+    results_dict = None
+    ##########
     if ccs:
         meths = My_Algo_Names
         final_table_lines = {"Head": "$\\varpi$ & " + " & ".join(meths) + " \\\\"}
         print(final_table_lines)
         all_values_dict = None
         add_varpi_value = (len(list(convert_string_to_numpy(Varpis[0]))) < 8)
+        #### A dictionnary to keep all of the results scores
+        results_dict = {}
         for v, selected_varpi in enumerate(Varpis):
             if add_varpi_value:
                 final_table_lines["$\\varpi_{{{}}}$".format(v+1)] = "$\\varpi_{{{}}} = {{{}}}$".format(v+1, list(convert_string_to_numpy(selected_varpi)))
@@ -616,10 +642,12 @@ def latexify_eval_results(env_name, data, meths, ccs, her_flag, osi_flag, Agent_
 
             ####
             if summ_ret == True:
-                latex_table_lines, values_dict = get_latex_table_lines_ccs(env_name, selected_data, Agent_Seeds, My_Algo_Names, Env_Params, continuous, n_regions, Regions, keys=["Env. Returns", "CCS Return"], keep_best_model=keep_best_model)
+                latex_table_lines, values_dict, varpi_values_dict = get_latex_table_lines_ccs(env_name, selected_data, Agent_Seeds, My_Algo_Names, Env_Params, continuous, n_regions, Regions, keys=["Env. Returns", "CCS Return"], keep_best_model=keep_best_model)
             else:
-                latex_table_lines, values_dict = get_latex_table_lines_ccs(env_name, selected_data, Agent_Seeds, My_Algo_Names, Env_Params, continuous, n_regions, Regions, keys=["Env. FinalPos", "CCS FinalPos"], keep_best_model=keep_best_model)
+                latex_table_lines, values_dict, varpi_values_dict = get_latex_table_lines_ccs(env_name, selected_data, Agent_Seeds, My_Algo_Names, Env_Params, continuous, n_regions, Regions, keys=["Env. FinalPos", "CCS FinalPos"], keep_best_model=keep_best_model)
 
+            ################################################################################
+            results_dict["$\\varpi_{{{}}}$".format(v+1)] = varpi_values_dict
             ################################################################################
             if all_values_dict is None:
                 all_values_dict = values_dict
@@ -761,8 +789,16 @@ def latexify_eval_results(env_name, data, meths, ccs, her_flag, osi_flag, Agent_
     if ccs:
         result_type = ("her" if her_flag else "no_her") + ("_20240710" if her_flag else "_20240729")
         result_type += "_osi" if osi_flag else ""
+        #####
         if n_regions == 5:
             result_type = result_type.replace("_20240710", "_20240802")
+        #####
+        if cvar_flag:
+            cvar_suffix = "_cvar{}".format(str(cvar_alpha).replace(".", "p"))
+            result_type += cvar_suffix
+            result_type = result_type.replace("_20240710", "_202502").replace("_20240729", "_202502")
+            result_type = result_type.replace("her", "cvar").replace("no_her", "cvar")
+        #####
         TEX_DIR = BASE_DIR + "tex_files/{}/{}/".format(result_type, env_name + "_{}d".format((n_regions - 1)//2))
     else:
         TEX_DIR = BASE_DIR + "tex_files_uevol/{}/".format(env_name)
@@ -772,6 +808,9 @@ def latexify_eval_results(env_name, data, meths, ccs, her_flag, osi_flag, Agent_
         tex_file.write(latex_file)
     if ccs:
         plt.savefig(TEX_DIR + filename.replace(".tex", "_plot.pdf"))
+        if results_dict is not None:
+            with open(TEX_DIR + "all_results_dict" + ("" if summ_ret else "_finalpos") + '.pickle', 'wb') as f:
+                pickle.dump(results_dict, f, pickle.HIGHEST_PROTOCOL)
     #"""
     ################################################################################
     cmd = "cd {} && pdflatex -halt-on-error {} >/dev/null".format(TEX_DIR, filename)
@@ -791,14 +830,9 @@ def main():
     env_name = args.env_name
     use_encoder = False
     #####
-    if use_encoder:
-        config_filename = env_name.split("-")[0] + ".yaml"
-        if "DClaw" in config_filename:
-            config_filename = "DClaw.yaml"
-    else:
-        config_filename = env_name.split("-")[0] + "_for_test" + ".yaml"
-        if "DClaw" in config_filename:
-            config_filename = "DClaw_for_test.yaml"
+    config_filename = env_name.split("-")[0] + ".yaml"
+    if "DClaw" in config_filename:
+        config_filename = "DClaw.yaml"
     ###
     with open("./pytorch_rl_collection/configs/" + config_filename, "r") as f:
         config = yaml.load(f, Loader=yaml.FullLoader)
@@ -816,9 +850,13 @@ def main():
     paths = []
     prev_algo_name = None
     for algo_name in args.algos:
-        output_path_suffix = get_date_suffix(algo_name.replace("_no_solver", "-v1"), env_name, args.multi_dim, args.her)
-        algo = algo_name.replace("_no_solver", "") + ("_UT" if args.use_ut else "_MC") + ("_EX" if args.explicit_scal else "_IMP") + ("_cont" if args.continuous else "_disc")
-        algo += ("_no_solver" if "_no_solver" in algo_name else "") + "_her"
+        output_path_suffix = get_date_suffix(algo_name.replace("_no_solver", "-v1"), env_name, args.multi_dim, args.her, args.use_cvar)
+        algo = algo_name.replace("_no_solver", "_v1") + ("_UT" if args.use_ut else "_MC") + ("_EX" if args.explicit_scal else "_IMP")# + ("_cont" if args.continuous else "_disc")
+        if algo_name == "umdsac":
+            algo = algo.replace("umdsac", "umdsac_v2")
+        cvar_suffix = "_cvar{}".format(str(args.cvar_alpha).replace(".", "p")) if args.use_cvar else ""
+        #algo += ("_no_solver" if "_no_solver" in algo_name else "")
+        algo += "_her" + cvar_suffix
         ####
         if "sirsa" == algo_name:
             algo = algo.replace("_her", "")
@@ -841,14 +879,16 @@ def main():
                 prev_algo_name = algo_name
             ######
             filename = "{}_test_target".format(env_name.split("-")[0]) + ("_ccs" if args.ccs else "")#("_osi" if args.use_osi else ""))
-            if "sirsa" == algo_name:# or "cmdsac" == algo_name
-                filename = filename.replace("_ccs", "_osi")
-            if args.use_osi and "md" in algo_name:
+            #if "sirsa" == algo_name:# or "cmdsac" == algo_name
+            #    filename = filename.replace("_ccs", "_osi")
+            if args.use_osi and ("md" in algo_name or "sirsa" == algo_name):
                 filename = filename.replace("_ccs", "_osi")
             filename += ("_ut_on_ut_cont_no_her" if args.continuous else "") + "_rndseed{}{}_{}.csv".format(1234, filename_suffix, algo_name)
             filenames.append(output_path + filename)
     #####
     HER = args.her
+    CVAR = args.use_cvar
+    CVAR_ALPHA = args.cvar_alpha
     CCS = args.ccs
     OSI = args.use_osi
     CONTINUOUS = args.continuous
@@ -888,12 +928,12 @@ def main():
     else:
         VARPIS = []
     #####
-    latexify_eval_results(env_name, data, meths, CCS, HER, OSI, Agent_Seeds, VARPIS, MY_ALGO_NAMES, ENV_PARAMS, CONTINUOUS, n_regions, REGIONS, summ_ret=True, keep_best_model=False)
+    latexify_eval_results(env_name, data, meths, CCS, HER, OSI, CVAR, CVAR_ALPHA, Agent_Seeds, VARPIS, MY_ALGO_NAMES, ENV_PARAMS, CONTINUOUS, n_regions, REGIONS, summ_ret=True, keep_best_model=False)
     if CCS:
-        latexify_eval_results(env_name, data, meths, CCS, HER, OSI, Agent_Seeds, VARPIS, MY_ALGO_NAMES, ENV_PARAMS, CONTINUOUS, n_regions, REGIONS, summ_ret=True, keep_best_model=True)
+        latexify_eval_results(env_name, data, meths, CCS, HER, OSI, CVAR, CVAR_ALPHA, Agent_Seeds, VARPIS, MY_ALGO_NAMES, ENV_PARAMS, CONTINUOUS, n_regions, REGIONS, summ_ret=True, keep_best_model=True)
         if "DClaw" in env_name:
-            latexify_eval_results(env_name, data, meths, CCS, HER, OSI, Agent_Seeds, VARPIS, MY_ALGO_NAMES, ENV_PARAMS, CONTINUOUS, n_regions, REGIONS, summ_ret=False, keep_best_model=False)
-            latexify_eval_results(env_name, data, meths, CCS, HER, OSI, Agent_Seeds, VARPIS, MY_ALGO_NAMES, ENV_PARAMS, CONTINUOUS, n_regions, REGIONS, summ_ret=False, keep_best_model=True)
+            latexify_eval_results(env_name, data, meths, CCS, HER, OSI, CVAR, CVAR_ALPHA, Agent_Seeds, VARPIS, MY_ALGO_NAMES, ENV_PARAMS, CONTINUOUS, n_regions, REGIONS, summ_ret=False, keep_best_model=False)
+            latexify_eval_results(env_name, data, meths, CCS, HER, OSI, CVAR, CVAR_ALPHA, Agent_Seeds, VARPIS, MY_ALGO_NAMES, ENV_PARAMS, CONTINUOUS, n_regions, REGIONS, summ_ret=False, keep_best_model=True)
     #####
     print(paths)
 

@@ -63,6 +63,9 @@ class SIRSA_AGENT:
         self.discount = args.discount
         self.SI_ensemble_size = args.n_osi
         self.threshold = threshold
+        self.use_cvar = args.use_cvar
+        self.cvar_alpha = args.cvar_alpha
+        self.cvar_samples = args.cvar_samples
         print("++ Threshold: ", self.threshold)
 
         #
@@ -416,7 +419,36 @@ class SIRSA_AGENT:
         if states is not None:
             self.actor_optim.zero_grad()
             ############################################
-            if self.steps > self.threshold:
+            if self.steps > self.threshold and self.use_cvar:
+                bs = states.shape[0]
+                ####
+                mean, sigma = torch.split(self.osi_varpis, self.varpi_size//2, dim=-1)
+                ####
+                k = self.cvar_samples
+                varpis_kappas = torch.FloatTensor(k, mean.shape[-1]).to(self.device).uniform_(0., 1. + 1e-6, generator=self._points_random_generator)
+                varpis_kappas = mean + (2. * varpis_kappas.unsqueeze(1).repeat(1, bs, 1) - 1.) * np.sqrt(3.) * sigma
+                ############################################
+                actions, log_pi, _ = self.actor(
+                    torch.cat(
+                        (states,
+                        self.osi_varpis)
+                    , dim=-1)
+                )
+                ######
+                actions = actions.unsqueeze(0).repeat(k, 1, 1)
+                ######
+                aug_states = torch.cat((states.unsqueeze(0).repeat(k, 1, 1), varpis_kappas), dim=-1)
+                ###### estimate_cvar(returns, alpha, numpify=False)
+                policy_loss = (
+                    (self.alpha * log_pi) - estimate_cvar(
+                        torch.min(
+                            self.critic1([ aug_states, actions ]),
+                            self.critic2([ aug_states, actions ])
+                        ),
+                        alpha=self.cvar_alpha
+                    )
+                )
+            elif self.steps > self.threshold:
                 bs = states.shape[0]
                 ####
                 mean, sigma = torch.split(self.osi_varpis, self.varpi_size//2, dim=-1)

@@ -16,6 +16,26 @@ from pytorch_rl_collection.replay_buffers.replay_memory import MDReplayMemorySet
 from pytorch_rl_collection.envs_utils.env_set import SIRSAMDEnvSet, MDEnvSet
 
 #########################################################################################
+from hilbertcurve.hilbertcurve import HilbertCurve
+from collections import defaultdict
+
+# Map samples to Hilbert indices
+def get_hilbert_indices(hilbert_curve, samples, bin_size):
+    hilbert_indices = []
+    for sample in samples:
+        scaled_sample = [int(coord // bin_size) for coord in sample]
+        hilbert_index = hilbert_curve.distance_from_point(scaled_sample)
+        hilbert_indices.append(hilbert_index)
+    return hilbert_indices
+
+# Update counters for the samples
+def update_counters(hilbert_curve, samples, bin_size, counters):
+    hilbert_indices = get_hilbert_indices(hilbert_curve, samples, bin_size)
+    for index in hilbert_indices:
+        counters[index] += 1
+    return counters
+
+#########################################################################################
 def get_agent(algo_name):
     return {
         "drsac": DRSAC_AGENT,
@@ -64,6 +84,7 @@ def mdsac_algorithm(agent, env, args, np, use_encoder, output_path):
     #####
     train_csv_writing_mode = 'w'
     eval_csv_writing_mode = 'w'
+    sampled_params_writing_mode = 'w'
     #####
     ## + Initialize entropy temperature parameters \alpha
     agent.initialize_entropy_temperature()
@@ -84,6 +105,12 @@ def mdsac_algorithm(agent, env, args, np, use_encoder, output_path):
     agent.initialize_OSI()
     ## + Initialize the replay buffer
     agent.initialize_replay_buffer_set(size=args.n_regions)
+    #########
+    p = 4  # Order of the Hilbert curve (2^p bins per dimension)
+    bin_size = 1/(2**p)  # Size of each bin
+    hilbert_curve = HilbertCurve(p, agent.varpi_size // 2)
+    # Initialize counters
+    counters = defaultdict(int)
     ###
     if not args.just_run_test_target:
         ## + With M = total_num_episodes
@@ -145,6 +172,15 @@ def mdsac_algorithm(agent, env, args, np, use_encoder, output_path):
                     ####
                     ## + If use Hindsight Experience Replay.
                     if minibatch_states is not None and args.use_her:
+                        mb_k = ((minibatch_kappas - agent.min_rel_param) / (agent.max_rel_param - agent.min_rel_param)).cpu().numpy()
+                        ######
+                        counters = update_counters(hilbert_curve, mb_k, bin_size, counters)
+                        pd.DataFrame(counters, index=[0]).to_csv(
+                            output_path + "checkpoint/minibatch_params_count.csv",
+                            mode='w',
+                            header=True
+                        )
+                        ##
                         assert minibatch_states.shape[0] == args.batch_size
                         minibatch_varpis = agent.sample_varpis(size=args.batch_size, her=True, kappas=minibatch_kappas)
                     elif minibatch_states is None:
@@ -195,8 +231,6 @@ def mdsac_algorithm(agent, env, args, np, use_encoder, output_path):
                 ##
                 state = new_state[~done]
                 ##
-                I = I[~done]
-                ##
                 if (done == True).all() or (t+1) == env._max_episode_steps:
                     min_ret = (np.round(np.min(episode_rewards), 3), np.argmin(episode_rewards)+1)
                     max_ret = (np.round(np.max(episode_rewards), 3), np.argmax(episode_rewards)+1)
@@ -206,11 +240,21 @@ def mdsac_algorithm(agent, env, args, np, use_encoder, output_path):
                         min_ret, max_ret, mean_ret, median_ret,
                         np.round(episode_loss, 4)
                     ))
-                    pd.DataFrame(episode_rewards.reshape(1, -1)).to_csv(output_path + "checkpoint/train_returns.csv",
+                    pd.DataFrame({"Episodes": [i_episode], "Steps": [agent.steps], "Scores": [episode_rewards.reshape(-1)]}).to_csv(output_path + "checkpoint/train_returns.csv",
                                  mode=train_csv_writing_mode, header=(train_csv_writing_mode == 'w' or not os.path.isfile(output_path + "checkpoint/train_returns.csv"))
                     )
                     train_csv_writing_mode = 'a'
+                    ######
+                    pd.DataFrame({"x": I[:, 0], "y": I[:, 1], "T": [t+1]}).to_csv(
+                        output_path + "checkpoint/sampled_params.csv",
+                        mode=sampled_params_writing_mode,
+                        header=(sampled_params_writing_mode == 'w' or not os.path.isfile(output_path + "checkpoint/sampled_params.csv"))
+                    )
+                    sampled_params_writing_mode = 'a'
                     break
+                else:
+                    ##
+                    I = I[~done]
             ####
             if i_episode % 10 == 0:
                 #if args.continuous:
@@ -245,7 +289,7 @@ def mdsac_algorithm(agent, env, args, np, use_encoder, output_path):
                         best_reward = avg_reward
                         agent.save_model(output_path + "best/")
                 ######
-                pd.DataFrame(avg_reward.reshape(1, -1)).to_csv(
+                pd.DataFrame({"Scores": [avg_reward.reshape(-1)]}).to_csv(
                     output_path + "checkpoint/eval_returns.csv",
                     mode=eval_csv_writing_mode,
                     header=(eval_csv_writing_mode == 'w' or not os.path.isfile(output_path + "checkpoint/eval_returns.csv"))
@@ -301,7 +345,13 @@ def run_mdsac_algorithm(args):
     if not args.just_run_test_target:
         output_path_suffix = "_" + "".join(date)
     else:
-        output_path_suffix = "_20240710" if args.multi_dim else "_20240802"
+        ## sdrsac CVAR
+        #assert args.multi_dim == False
+        #output_path_suffix = "_20250223"
+        ## Both umdsac CVAR
+        assert args.multi_dim == False
+        output_path_suffix = "_20250224"
+        #output_path_suffix = "_20240710" if args.multi_dim else "_20240802"
     ###
     algo = args.algo
     if algo == "umdsac":
@@ -310,8 +360,9 @@ def run_mdsac_algorithm(args):
         algo += ("_UT" if args.use_ut else "_MC") + ("_EX" if args.explicit_scal else "_IMP")
     ###
     env_key_list = list(env.params_idxs.keys())
+    cvar_suffix = "_cvar{}".format(str(args.cvar_alpha).replace(".", "p")) if args.use_cvar else ""
     output_path = "./trained_agents/{}/{}_{}/{}/".format(
-        algo + ("_her" if args.use_her else ""),
+        algo + ("_her" if args.use_her else "") + cvar_suffix,
         args.env_name + ("_ObsNoise" if add_observation_noise else ""),
         ("all" if len(env_key_list) > 2 else "_".join(env_key_list)) + output_path_suffix,
         args.seed
@@ -328,7 +379,7 @@ def run_mdsac_algorithm(args):
     ################
     ################
     from pytorch_rl_collection.test_target_env import run_test_target
-    use_osi = True
+    use_osi = False
     run_test_target(actor=agent.actor, output_path=output_path, env_name=args.env_name, algo_name=args.algo,
             actor_seed=args.seed, dim=domains_dim, osi_net=agent.get_osi(),
             ccs=True, continuous=args.continuous, use_osi=use_osi, save_results=True, use_encoder=use_encoder,

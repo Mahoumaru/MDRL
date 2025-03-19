@@ -247,4 +247,10 @@ $RECYCLE.BIN/
 # Windows shortcuts
 *.lnk
 
+# Project specific directories to git-ignore
+results
+trained_agents
+stat_significance_tests.py
+plot_sac.py
+
 # End of https://www.toptal.com/developers/gitignore/api/python,linux,macos,windows
